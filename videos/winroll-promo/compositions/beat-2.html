@@ -1,0 +1,62 @@
+<template id="b2-template">
+  <div data-hf-id="hf-zq4x" id="b2-root" data-composition-id="beat2" data-start="0" data-duration="3.39" data-width="1920" data-height="1080">
+    <style>
+@font-face { font-family: "Segoe UI Variable"; src: local("Segoe UI Variable"), local("Segoe UI Variable Display"), local("Segoe UI"); font-weight: 400 700; }
+      #b2-root { width:1920px; height:1080px; background:#FDFDFC; color:#242622; font-family:"Segoe UI Variable", "Segoe UI", Arial, sans-serif; }
+      #b2-root * { box-sizing:border-box; }
+      #b2-content { width:100%; height:100%; padding:100px 120px; display:flex; flex-direction:column; gap:44px; }
+      #b2-brand { display:flex; align-items:center; gap:14px; font-size:30px; font-weight:650; height:48px; }
+      #b2-mark { width:38px; height:38px; }
+      #b2-rs { color:#AD4227; }
+      #b2-row { flex:1; display:flex; align-items:center; gap:100px; }
+      #b2-copy { width:720px; flex:none; }
+      #b2-heading { margin:0; font-size:126px; line-height:1.06; letter-spacing:-.045em; font-weight:700; }
+      #b2-click, #b2-roll { display:block; }
+      #b2-roll { color:#AD4227; margin-top:18px; }
+      #b2-rule { width:132px; height:6px; background:#AD4227; margin-top:46px; transform-origin:left center; }
+      #b2-panel { width:860px; height:620px; flex:none; border-radius:12px; background:#FBF3EE; border:1px solid #DDD9D5; display:flex; flex-direction:column; align-items:center; justify-content:center; gap:24px; }
+      #b2-window { width:800px; height:445px; position:relative; flex:none; }
+      #b2-expanded, #b2-rolled { position:absolute; top:0; left:0; width:800px; height:auto; display:block; }
+      #b2-rolled { opacity:0; }
+      #b2-caption { margin:0; width:800px; height:47px; position:relative; font-size:36px; line-height:1.3; font-weight:400; color:#60616B; }
+      #b2-expanded-label, #b2-rolled-label { position:absolute; inset:0; text-align:center; }
+      #b2-rolled-label { opacity:0; color:#AD4227; }
+    </style>
+    <div data-hf-id="hf-7jkt" id="b2-content">
+      <div data-hf-id="hf-nai9" id="b2-brand"><img data-hf-id="hf-yqnb" id="b2-mark" src="capture/assets/app-window.svg" alt=""><span data-hf-id="hf-m646">WinRoll <span data-hf-id="hf-43c9" id="b2-rs">RS</span></span></div>
+      <div data-hf-id="hf-twry" id="b2-row">
+        <div data-hf-id="hf-3c8x" id="b2-copy">
+          <h1 data-hf-id="hf-oz66" id="b2-heading"><span data-hf-id="hf-asny" id="b2-click">Right-click.</span><span data-hf-id="hf-umco" id="b2-roll">Roll up.</span></h1>
+          <div data-hf-id="hf-1qwg" id="b2-rule"></div>
+        </div>
+        <div data-hf-id="hf-bksc" id="b2-panel">
+          <div id="b2-window">
+            <img id="b2-expanded" src="capture/assets/explorer-expanded.png" alt="File Explorer in its expanded state">
+            <img id="b2-rolled" src="capture/assets/explorer-rolled.png" alt="The same File Explorer window rolled to its title bar">
+          </div>
+          <p data-hf-id="hf-hs69" id="b2-caption"><span id="b2-expanded-label">Expanded</span><span id="b2-rolled-label">Rolled up</span></p>
+        </div>
+      </div>
+    </div>
+    <script>
+      (() => {
+        const tl = gsap.timeline({ paused:true });
+        tl.from('#b2-brand', { scale:.92, opacity:0, duration:.38, ease:'sine.out' }, .1);
+        tl.from('#b2-click', { x:-55, opacity:0, duration:.5, ease:'back.out(1.15)' }, .12);
+        tl.from('#b2-panel', { x:35, opacity:0, duration:.58, ease:'power2.out' }, .18);
+        tl.from('#b2-window', { scale:.96, opacity:0, duration:.55, ease:'back.out(1.15)' }, .22);
+        tl.from('#b2-roll', { y:45, opacity:0, duration:.43, ease:'power2.out' }, .34);
+        tl.from('#b2-rule', { scaleX:0, duration:.42, ease:'sine.out' }, .46);
+        tl.from('#b2-caption', { opacity:0, duration:.32, ease:'sine.out' }, .62);
+        // Status crossfade uses the supplied screenshots; it does not distort either window.
+        tl.to('#b2-expanded', { opacity:0, duration:.45, ease:'sine.inOut' }, 1.65);
+        tl.fromTo('#b2-rolled', { opacity:0 }, { opacity:1, duration:.45, ease:'sine.inOut', immediateRender:false }, 1.65);
+        tl.to('#b2-expanded-label', { opacity:0, duration:.3, ease:'power2.inOut' }, 1.65);
+        tl.fromTo('#b2-rolled-label', { opacity:0 }, { opacity:1, duration:.3, ease:'power2.inOut', immediateRender:false }, 1.8);
+        window.__timelines = window.__timelines || {};
+        window.__timelines.beat2 = tl;
+      })();
+    </script>
+  </div>
+</template>
+

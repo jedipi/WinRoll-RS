@@ -1,0 +1,69 @@
+<template id="b3-template">
+  <div data-hf-id="hf-hdtl" id="b3-root" data-composition-id="beat3" data-start="0" data-duration="3.19" data-width="1920" data-height="1080">
+    <style>
+@font-face { font-family: "Segoe UI Variable"; src: local("Segoe UI Variable"), local("Segoe UI Variable Display"), local("Segoe UI"); font-weight: 400 700; }
+      #b3-root { width:1920px; height:1080px; background:#FDFDFC; color:#242622; font-family:"Segoe UI Variable","Segoe UI",Arial,sans-serif; }
+      #b3-root * { box-sizing:border-box; }
+      #b3-content { width:100%; height:100%; padding:100px 120px; display:flex; flex-direction:column; gap:44px; }
+      #b3-brand { display:flex; align-items:center; gap:14px; height:48px; }
+      #b3-mark { width:40px; height:40px; object-fit:contain; }
+      #b3-wordmark { font-size:30px; font-weight:650; letter-spacing:-.025em; }
+      #b3-wordmark span { color:#AD4227; }
+      #b3-main { display:flex; align-items:center; gap:60px; flex:1; min-height:0; }
+      #b3-copy { width:720px; flex-shrink:0; }
+      #b3-title { margin:0; font-size:84px; line-height:1.08; font-weight:700; letter-spacing:-.045em; }
+      #b3-drag, #b3-unroll { display:block; }
+      #b3-unroll { color:#AD4227; margin-top:20px; }
+      #b3-support { margin:38px 0 0; color:#60616B; font-size:40px; line-height:1.3; }
+      #b3-visual { width:900px; flex-shrink:0; height:720px; padding:18px 20px; display:flex; flex-direction:column; align-items:center; justify-content:center; gap:20px; background:#FBF3EE; border-radius:12px; }
+      #b3-window { width:760px; height:425px; position:relative; flex:none; }
+      #b3-rolled, #b3-expanded { position:absolute; top:0; left:0; display:block; width:760px; height:auto; }
+      #b3-expanded { opacity:0; }
+      #b3-status { width:760px; height:47px; position:relative; font-size:36px; line-height:1.3; color:#60616B; }
+      #b3-rolled-label, #b3-expanded-label { position:absolute; inset:0; text-align:center; }
+      #b3-expanded-label { opacity:0; color:#AD4227; }
+    </style>
+    <div data-hf-id="hf-ie2c" id="b3-content">
+      <div data-hf-id="hf-vkp0" id="b3-brand">
+        <img data-hf-id="hf-0kt4" id="b3-mark" src="capture/assets/app-window.svg" alt="">
+        <div data-hf-id="hf-97y3" id="b3-wordmark">WinRoll <span data-hf-id="hf-3y5q">RS</span></div>
+      </div>
+      <div data-hf-id="hf-mm5a" id="b3-main">
+        <div data-hf-id="hf-vu5q" id="b3-copy">
+          <h1 data-hf-id="hf-y5rr" id="b3-title"><span data-hf-id="hf-vkuo" id="b3-drag">Drag to move.</span><span data-hf-id="hf-zswn" id="b3-unroll">Unroll when ready.</span></h1>
+          <p data-hf-id="hf-mdun" id="b3-support">Your apps stay open.</p>
+        </div>
+        <div data-hf-id="hf-mif9" id="b3-visual">
+          <div id="b3-window">
+            <img id="b3-rolled" src="capture/assets/explorer-rolled.png" alt="File Explorer rolled up to its title bar">
+            <img id="b3-expanded" src="capture/assets/explorer-expanded.png" alt="File Explorer unrolled to its expanded size">
+          </div>
+          <p id="b3-status"><span id="b3-rolled-label">Rolled up</span><span id="b3-expanded-label">Unrolled</span></p>
+        </div>
+      </div>
+    </div>
+    <script src="https://cdn.jsdelivr.net/npm/gsap@3.14.2/dist/gsap.min.js"></script>
+    <script>
+      (() => {
+        const tl = gsap.timeline({ paused:true });
+        tl.from("#b3-mark", { scale:.92, opacity:0, duration:.45, ease:"power3.out" }, .1);
+        tl.from("#b3-wordmark", { y:12, opacity:0, duration:.45, ease:"expo.out" }, .14);
+        tl.from("#b3-drag", { y:45, opacity:0, duration:.6, ease:"power3.out" }, .18);
+        tl.from("#b3-visual", { opacity:0, duration:.45, ease:"sine.out" }, .1);
+        tl.from("#b3-window", { y:-24, opacity:0, duration:.5, ease:"expo.out" }, .24);
+        tl.from("#b3-status", { opacity:0, duration:.4, ease:"power3.out" }, .3);
+        tl.to("#b3-window", { x:40, duration:.65, ease:"sine.inOut" }, .55);
+        // The expanded state appears at the moved window's position, on the "unroll" cue.
+        tl.to("#b3-rolled", { opacity:0, duration:.4, ease:"sine.inOut" }, 1.22);
+        tl.fromTo("#b3-expanded", { opacity:0 }, { opacity:1, duration:.4, ease:"sine.inOut", immediateRender:false }, 1.22);
+        tl.to("#b3-rolled-label", { opacity:0, duration:.25, ease:"power2.inOut" }, 1.22);
+        tl.fromTo("#b3-expanded-label", { opacity:0 }, { opacity:1, duration:.25, ease:"power2.inOut", immediateRender:false }, 1.35);
+        tl.from("#b3-unroll", { y:35, opacity:0, duration:.55, ease:"expo.out" }, 1.1);
+        tl.from("#b3-support", { x:-25, opacity:0, duration:.5, ease:"sine.out" }, .9);
+        window.__timelines = window.__timelines || {};
+        window.__timelines.beat3 = tl;
+      })();
+    </script>
+  </div>
+</template>
+

@@ -1,0 +1,169 @@
+{
+  "typography": [
+    {
+      "role": "heading",
+      "fontFamily": "Segoe UI Variable",
+      "fontSize": "96px",
+      "fontWeight": "650",
+      "lineHeight": "101.76px",
+      "letterSpacing": "-5.28px",
+      "color": "#242622",
+      "sampleText": "Right-click.Roll up."
+    },
+    {
+      "role": "display",
+      "fontFamily": "Segoe UI Variable",
+      "fontSize": "80px",
+      "fontWeight": "650",
+      "lineHeight": "88px",
+      "letterSpacing": "-4.4px",
+      "color": "#242622",
+      "sampleText": "Keep it open.Make room."
+    },
+    {
+      "role": "heading-2",
+      "fontFamily": "Segoe UI Variable",
+      "fontSize": "36px",
+      "fontWeight": "600",
+      "lineHeight": "54px",
+      "letterSpacing": "-1.44px",
+      "color": "#242622",
+      "sampleText": "Get started"
+    },
+    {
+      "role": "heading-2",
+      "fontFamily": "Segoe UI Variable",
+      "fontSize": "32px",
+      "fontWeight": "650",
+      "lineHeight": "38.4px",
+      "letterSpacing": "-1.28px",
+      "color": "#242622",
+      "sampleText": "Control from the tray"
+    },
+    {
+      "role": "link",
+      "fontFamily": "Segoe UI Variable",
+      "fontSize": "30px",
+      "fontWeight": "650",
+      "lineHeight": "45px",
+      "letterSpacing": "-1.2px",
+      "color": "#242622",
+      "sampleText": "WinRoll RS"
+    },
+    {
+      "role": "heading-3",
+      "fontFamily": "Segoe UI Variable",
+      "fontSize": "21px",
+      "fontWeight": "650",
+      "lineHeight": "29.4px",
+      "letterSpacing": "-0.42px",
+      "color": "#242622",
+      "sampleText": "Right-click an empty caption"
+    },
+    {
+      "role": "body",
+      "fontFamily": "Segoe UI Variable",
+      "fontSize": "21px",
+      "fontWeight": "400",
+      "lineHeight": "31.5px",
+      "letterSpacing": "normal",
+      "color": "#60616B",
+      "sampleText": "Roll eligible windows up to their title bars with a right-cl"
+    },
+    {
+      "role": "heading-3",
+      "fontFamily": "Segoe UI Variable",
+      "fontSize": "18px",
+      "fontWeight": "650",
+      "lineHeight": "25.2px",
+      "letterSpacing": "-0.36px",
+      "color": "#242622",
+      "sampleText": "Build from source"
+    },
+    {
+      "role": "code",
+      "fontFamily": "Cascadia Code",
+      "fontSize": "12px",
+      "fontWeight": "400",
+      "lineHeight": "24px",
+      "letterSpacing": "normal",
+      "color": "#242622",
+      "sampleText": "git clone https://github.com/jedipi/WinRoll-RS.git cd WinRol"
+    }
+  ],
+  "spacing": {
+    "observed": [
+      6,
+      8,
+      10,
+      12,
+      13,
+      16,
+      18,
+      20,
+      24,
+      26,
+      28,
+      30,
+      36,
+      40,
+      42
+    ],
+    "baseUnit": 4
+  },
+  "radius": [
+    "8px"
+  ],
+  "shadows": [],
+  "buttons": [
+    {
+      "label": "View releases",
+      "background": "#242622",
+      "backgroundImage": "",
+      "backdropFilter": "",
+      "color": "#FDFDFC",
+      "padding": "15px 26px",
+      "borderRadius": "8px",
+      "border": "0px none rgb(253, 253, 252)",
+      "boxShadow": "none",
+      "fontSize": "18px",
+      "fontWeight": "600",
+      "height": "64px"
+    }
+  ],
+  "cards": [
+    {
+      "label": "card",
+      "background": "transparent",
+      "backgroundImage": "",
+      "backdropFilter": "",
+      "color": "#242622",
+      "padding": "0px",
+      "borderRadius": "0px",
+      "border": "0px none rgb(36, 38, 34)",
+      "boxShadow": "none",
+      "fontSize": "16px",
+      "fontWeight": "400",
+      "height": "110px"
+    }
+  ],
+  "nav": {
+    "label": "navigation",
+    "background": "transparent",
+    "backgroundImage": "",
+    "backdropFilter": "",
+    "color": "#242622",
+    "padding": "0px",
+    "borderRadius": "0px",
+    "border": "0px none rgb(36, 38, 34)",
+    "boxShadow": "none",
+    "fontSize": "16px",
+    "fontWeight": "400",
+    "height": "98px"
+  },
+  "chips": [],
+  "statCells": [],
+  "tabs": [],
+  "backgrounds": [],
+  "glass": []
+}
