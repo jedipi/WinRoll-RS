@@ -4,7 +4,12 @@ WinRoll RS is a Rust reimplementation of WinRoll 2.0 for Windows 10 and Windows 
 
 Visit the [WinRoll RS website](https://jedipi.github.io/WinRoll-RS/) to see how it works.
 
-[![Download WinRoll RS](https://img.shields.io/badge/Download-WinRoll%20RS-2563eb?style=for-the-badge)](https://github.com/jedipi/WinRoll-RS/releases)
+[![Download WinRoll RS](https://img.shields.io/badge/Download-WinRoll%20RS-2563eb?style=for-the-badge)](https://github.com/jedipi/WinRoll-RS/releases/latest)
+
+Direct downloads for the latest release, v0.1.0:
+
+- [Portable version (ZIP, x64)](https://github.com/jedipi/WinRoll-RS/releases/download/v0.1.0/winroll-0.1.0-x64-portable.zip)
+- [Installer (EXE, x64)](https://github.com/jedipi/WinRoll-RS/releases/download/v0.1.0/winroll-0.1.0-x64-setup.exe)
 
 WinRoll lets you roll a window up into its title bar, like a window shade. It also has a few small window-management features: Always on Top, Send to Back, transparency, and minimizing windows to the system tray.
 
