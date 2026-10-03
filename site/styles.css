@@ -1,0 +1,128 @@
+/* Option 3: image-led workspace story. Official Tabler SVGs supply UI icons. */
+:root {
+  color-scheme: light dark;
+  --surface: #fdfdfc;
+  --text: #242622;
+  --muted: #60616b;
+  --accent: #ad4227;
+  --tint: #fbf3ee;
+  --line: #ddd9d5;
+  --button-text: #fdfdfc;
+  --radius: 8px;
+}
+* { box-sizing: border-box; }
+html { scroll-padding-top: 24px; }
+body { margin: 0; background: var(--surface); color: var(--text); font: 16px/1.5 "Segoe UI Variable", "Segoe UI", Arial, sans-serif; -webkit-font-smoothing: antialiased; }
+h1, h2, h3, p, figure, dl { margin: 0; }
+a { color: inherit; text-underline-offset: 5px; touch-action: manipulation; }
+a:hover { color: var(--accent); }
+a:focus-visible { outline: 2px solid var(--accent); outline-offset: 5px; }
+p { color: var(--muted); }
+.wrap { width: min(1344px, calc(100% - 72px)); margin-inline: auto; }
+.accent { color: var(--accent); }
+.skip { position: absolute; top: -80px; left: 24px; background: var(--surface); padding: 12px 20px; z-index: 1; }
+.skip:focus { top: 12px; }
+.icon { display: inline-block; flex: 0 0 auto; width: 24px; height: 24px; background: currentColor; mask: var(--icon) center / contain no-repeat; -webkit-mask: var(--icon) center / contain no-repeat; }
+.brand-icon { --icon: url("assets/icons/app-window.svg"); color: var(--accent); width: 42px; height: 42px; }
+.github-icon { --icon: url("assets/icons/brand-github.svg"); width: 27px; height: 27px; }
+.arrow-right { --icon: url("assets/icons/arrow-right.svg"); }
+.arrow-down { --icon: url("assets/icons/arrow-down.svg"); }
+nav { min-height: 98px; display: flex; align-items: center; justify-content: space-between; gap: 30px; }
+.brand { display: flex; align-items: center; gap: 13px; font-size: 30px; font-weight: 650; letter-spacing: -1.2px; text-decoration: none; white-space: nowrap; }
+.brand > .accent { margin-left: -6px; }
+.navlinks { display: flex; align-items: center; gap: 42px; font-size: 15px; }
+.navlinks a { text-decoration: none; white-space: nowrap; }
+.hero { display: grid; grid-template-columns: minmax(0, 1.8fr) minmax(0, 1fr); gap: 58px; align-items: center; padding-block: 18px 56px; }
+.hero-copy { padding-top: 0; }
+.hero-media { min-width: 0; }
+.hero-media video { display: block; width: 100%; height: auto; aspect-ratio: 16 / 9; object-fit: contain; background: var(--surface); border-radius: var(--radius); }
+h1 { font-size: clamp(44px, 5.7vw, 80px); font-weight: 650; line-height: 1.1; letter-spacing: -.055em; }
+.hero-copy > p { margin-top: 32px; max-width: 455px; font-size: 21px; line-height: 1.5; }
+.actions { display: flex; flex-direction: column; align-items: start; gap: 16px; margin-top: 37px; }
+.button { display: inline-flex; align-items: center; justify-content: center; gap: 18px; min-height: 64px; padding: 15px 26px; border-radius: var(--radius); font-size: 18px; font-weight: 600; text-decoration: none; white-space: nowrap; }
+.primary { background: var(--text); color: var(--button-text); }
+.primary:hover { background: var(--accent); color: var(--button-text); }
+.button:active { transform: translateY(1px); }
+.text-link { display: inline-flex; align-items: center; gap: 10px; padding-block: 6px; color: var(--accent); font-size: 16px; }
+.how-section { display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1.2fr); gap: 84px; padding-block: 0 36px; }
+.how-intro h2 { font-size: clamp(52px, 7.5vw, 96px); font-weight: 650; line-height: 1.06; letter-spacing: -.055em; }
+.how-intro p { margin-top: 28px; max-width: 460px; font-size: 21px; line-height: 1.5; }
+.gestures { display: flex; flex-direction: column; justify-content: center; gap: 42px; }
+.gesture { display: grid; grid-template-columns: 170px minmax(0, 1fr); gap: 36px; align-items: center; }
+.gesture img { display: block; width: 170px; height: 110px; object-fit: contain; }
+h3 { font-size: 21px; font-weight: 650; line-height: 1.4; letter-spacing: -.02em; }
+.gesture p { font-size: 16px; margin-top: 10px; }
+.tray-section { display: grid; grid-template-columns: minmax(0, .75fr) minmax(0, 1.5fr); align-items: center; gap: 40px; padding: 24px 28px; background: var(--tint); border-radius: var(--radius); }
+.tray-image { display: flex; align-items: center; justify-content: center; }
+.tray-image img { display: block; width: min(100%, 300px); height: auto; border-radius: 4px; }
+.tray-content { border-left: 1px solid var(--line); padding-left: 40px; }
+.tray-content h2 { font-size: 32px; line-height: 1.2; letter-spacing: -.04em; font-weight: 650; }
+.tray-content > p { margin-top: 10px; font-size: 17px; max-width: 500px; }
+.tray-controls { margin-top: 15px; }
+.tray-controls > div { display: grid; grid-template-columns: 138px minmax(0, 1fr); gap: 24px; padding-block: 8px; }
+.tray-controls > div + div { border-top: 1px solid var(--line); }
+.tray-controls dt { font-weight: 600; color: var(--accent); }
+.tray-controls dd { margin: 0; color: var(--muted); font-size: 15px; line-height: 1.4; }
+.start-section { border-top: 1px solid var(--line); display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); gap: 42px 80px; margin-top: 40px; padding-block: 64px 48px; }
+.start-heading h2 { font-size: 36px; font-weight: 600; letter-spacing: -.04em; }
+.start-heading p { font-size: 16px; margin-top: 16px; max-width: 430px; }
+.start-heading .text-link { margin-top: 20px; font-size: 14px; }
+.build h3 { font-size: 18px; }
+.build p { font-size: 14px; margin-top: 12px; }
+pre { background: var(--tint); border: 1px solid var(--line); border-radius: var(--radius); padding: 20px; overflow: auto; font: 12px/2 "Cascadia Code", Consolas, monospace; margin: 20px 0 0; }
+footer { display: flex; justify-content: space-between; gap: 20px; padding-block: 26px; border-top: 1px solid var(--line); font-size: 12px; }
+@media (prefers-color-scheme: dark) {
+  :root { --surface: #1c1d1b; --text: #eeeae7; --muted: #bfb9b4; --accent: #eea084; --tint: #2b2521; --line: #4a423c; --button-text: #1c1d1b; }
+}
+@media (prefers-reduced-motion: no-preference) {
+  .button { transition: background-color .18s ease, color .18s ease, transform .18s ease; }
+}
+@media (max-width: 1100px) {
+  .wrap { width: calc(100% - 64px); }
+  .hero { grid-template-columns: minmax(0, 1.3fr) minmax(0, 1fr); gap: 34px; padding-bottom: 60px; }
+  h1 { font-size: clamp(44px, 5.2vw, 54px); }
+  .hero-copy > p, .how-intro p { font-size: 18px; }
+  .how-section { gap: 44px; }
+  .gesture { grid-template-columns: 120px minmax(0, 1fr); gap: 20px; }
+  .gesture img { width: 120px; height: 90px; }
+  .tray-section { padding: 30px; gap: 30px; }
+  .tray-content { padding-left: 30px; }
+  .tray-controls > div { grid-template-columns: 110px minmax(0, 1fr); gap: 18px; }
+}
+@media (max-width: 767px) {
+  .wrap { width: calc(100% - 40px); }
+  nav { min-height: 78px; gap: 16px; flex-wrap: wrap; padding-block: 16px; }
+  .brand { font-size: 23px; gap: 8px; }
+  .brand-icon { width: 30px; height: 30px; }
+  .navlinks { gap: 18px; font-size: 12px; }
+  .navlinks a:last-child { display: none; }
+  .hero { grid-template-columns: 1fr; gap: 34px; padding-block: 24px 46px; }
+  .hero-copy { grid-row: 1; padding-top: 0; }
+  h1 { font-size: clamp(44px, 9vw, 64px); }
+  .hero-copy > p { margin-top: 22px; max-width: 520px; }
+  .actions { margin-top: 26px; gap: 12px; }
+  .button { min-height: 54px; padding: 12px 21px; font-size: 16px; }
+  .how-section { grid-template-columns: 1fr; gap: 30px; padding-block: 22px 46px; }
+  .how-intro h2 { font-size: clamp(52px, 10vw, 70px); }
+  .how-intro p { margin-top: 20px; }
+  .gestures { gap: 26px; }
+  .gesture { grid-template-columns: 110px minmax(0, 1fr); gap: 18px; }
+  .gesture img { width: 110px; height: 100px; }
+  h3 { font-size: 18px; }
+  .gesture p { font-size: 14px; }
+  .tray-section { grid-template-columns: 1fr; padding: 24px; gap: 24px; }
+  .tray-image img { width: min(100%, 250px); }
+  .tray-content { border-left: 0; padding-left: 0; }
+  .tray-content h2 { font-size: 28px; }
+  .tray-content > p { font-size: 16px; }
+  .tray-controls > div { grid-template-columns: 100px minmax(0, 1fr); gap: 16px; }
+  .tray-controls dt, .tray-controls dd { font-size: 14px; }
+  .start-section { grid-template-columns: minmax(0, 1fr); gap: 32px; padding-block: 36px; }
+  .start-heading h2 { font-size: 32px; }
+}
+@media (max-width: 374px) {
+  .navlinks { gap: 12px; font-size: 11px; }
+  .brand { font-size: 20px; }
+  .gesture { grid-template-columns: 1fr; gap: 10px; }
+  .tray-controls > div { grid-template-columns: 1fr; gap: 5px; }
+}

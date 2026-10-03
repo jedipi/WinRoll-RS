@@ -1,0 +1,8 @@
+/target/
+/.cargo-cache/
+/experiment.log
+/videos
+/docs
+design-qa.md
+AGENTS.md
+CONTEXT.md
