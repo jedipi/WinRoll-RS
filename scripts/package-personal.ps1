@@ -16,6 +16,9 @@ $files = @{
     'THIRD-PARTY-NOTICES.txt' = Join-Path $repo 'THIRD-PARTY-NOTICES.txt'
     'RUST-COPYRIGHT.html' = Join-Path $sysroot 'share\doc\rust\COPYRIGHT-library.html'
 }
+if ($Destination -eq 'public-release') {
+    $files.Remove('compatibility-report.md')
+}
 $package = Join-Path $repo "target\$Destination\winroll-$version-x64"
 $zip = "$package.zip"
 foreach ($source in $files.Values | Where-Object { $_ -notlike '*.exe' }) {
@@ -25,8 +28,11 @@ foreach ($source in $files.Values | Where-Object { $_ -notlike '*.exe' }) {
 }
 if (Test-Path -LiteralPath $package) {
     $unexpected = Get-ChildItem -LiteralPath $package -Force |
-        Where-Object { $_.PSIsContainer -or $_.Name -notin (@($files.Keys) + 'SHA256SUMS.txt') }
+        Where-Object { $_.PSIsContainer -or $_.Name -notin (@($files.Keys) + 'SHA256SUMS.txt', 'compatibility-report.md') }
     if ($unexpected) { throw "Unexpected files in package directory: $package" }
+    if ($Destination -eq 'public-release' -and (Test-Path -LiteralPath (Join-Path $package 'compatibility-report.md'))) {
+        Remove-Item -LiteralPath (Join-Path $package 'compatibility-report.md')
+    }
 }
 Push-Location $repo
 try {

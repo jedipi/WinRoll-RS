@@ -1,6 +1,6 @@
 # WinRoll RS — usage and recovery
 
-WinRoll RS collapses ordinary application windows to their title bars. This portable x64 build is intended for Windows 10 22H2 and Windows 11 21H2 or newer. See the accompanying [compatibility report](compatibility-report.md) for tested versions, observed results and unverified environments; intended support is not a claim that every environment passed.
+WinRoll RS collapses ordinary application windows to their title bars. This portable x64 build is intended for Windows 10 22H2 and Windows 11 21H2 or newer. See the repository's [compatibility report](https://github.com/jedipi/WinRoll-RS/blob/main/docs/compatibility-report.md) for tested versions, observed results and unverified environments; intended support is not a claim that every environment passed.
 
 For the portable ZIP, extract it to a folder and double-click `winroll.exe`. Alternatively, run the setup executable to install for your Windows account, then launch **WinRoll RS** from the Start menu. The installer requires no administrator privileges and creates an uninstall entry in Windows Settings. Exit WinRoll RS through its tray before installing over an existing version or uninstalling; the installer does not force it to quit.
 

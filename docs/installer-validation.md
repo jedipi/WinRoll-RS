@@ -10,7 +10,7 @@
 - `winroll-0.1.0-x64-setup.exe`
 - `SHA256SUMS.txt`, covering both assets
 
-The ZIP and installer carry the same executable, usage/recovery guide, accepted compatibility report, original/dependency notices, Rust Standard Library notices and payload checksums. The executable remains SHA256 `2e7960ff9eddd2cc8c94b56cfb5ec5643f9ffc498d5fb5aed88fc38bc794c0a9`. The separate x86 fixture is excluded.
+The ZIP and installer carry the same executable, usage/recovery guide, original/dependency notices, Rust Standard Library notices and payload checksums. As requested on 2026-10-03, public packages exclude `compatibility-report.md`; the report remains in the repository and personal-testing package. The executable remains SHA256 `2e7960ff9eddd2cc8c94b56cfb5ec5643f9ffc498d5fb5aed88fc38bc794c0a9`. The separate x86 fixture is excluded.
 
 The installer installs under the current user's Local AppData, creates Start menu launch/uninstall shortcuts and a Windows uninstall entry, and does not request administrator privileges. Startup, launch after installation and updates remain manual. Its architecture/version gates reject non-x64 Windows and versions before Windows 10 22H2. Windows 11 21H2 (build 22000) and newer meet that minimum. A stable AppId allows replacement installations to share uninstall information.
 

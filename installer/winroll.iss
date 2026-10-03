@@ -36,7 +36,6 @@ WizardStyle=modern
 [Files]
 Source: "{#PackageDir}\winroll.exe"; DestDir: "{app}"; Flags: ignoreversion
 Source: "{#PackageDir}\README.md"; DestDir: "{app}"; Flags: ignoreversion
-Source: "{#PackageDir}\compatibility-report.md"; DestDir: "{app}"; Flags: ignoreversion
 Source: "{#PackageDir}\THIRD-PARTY-NOTICES.txt"; DestDir: "{app}"; Flags: ignoreversion
 Source: "{#PackageDir}\RUST-COPYRIGHT.html"; DestDir: "{app}"; Flags: ignoreversion
 Source: "{#PackageDir}\SHA256SUMS.txt"; DestDir: "{app}"; Flags: ignoreversion
