@@ -72,12 +72,13 @@ struct Target {
     rect: RECT,
 }
 enum Command {
-    Probe(POINT, SyncSender<Option<Target>>),
-    ProbeClose(POINT, SyncSender<Option<Target>>),
+    ProbeRight(POINT, SyncSender<Option<(Target, bool)>>),
+    ProbeClose(POINT, SyncSender<Option<(Target, bool)>>),
     ProbeRolled(POINT, SyncSender<Option<Target>>),
     FocusRolled(isize, Instant),
     Toggle(Target),
     ToggleTopmost(Target),
+    SendToBack(Target),
 }
 struct Drag {
     target: Target,
@@ -249,6 +250,11 @@ impl Manager {
     }
 
     fn probe_hit(&self, point: POINT, expected_hit: u32) -> Option<Target> {
+        self.probe_hits(point, &[expected_hit])
+            .map(|(target, _)| target)
+    }
+
+    fn probe_hits(&self, point: POINT, expected_hits: &[u32]) -> Option<(Target, u32)> {
         // SAFETY: Windows validates window handles and the writable output pointers.
         unsafe {
             let under_pointer = WindowFromPoint(point);
@@ -256,7 +262,7 @@ impl Manager {
             if hwnd.is_null()
                 || hwnd == GetConsoleWindow()
                 || !visible_caption(hwnd)
-                || (expected_hit == HTCAPTION && !ordinary(hwnd))
+                || (expected_hits == [HTCAPTION] && !ordinary(hwnd))
             {
                 log(format!(
                     "PASS THROUGH: ineligible hwnd={:#x} snapped={} maximized={} minimized={}",
@@ -303,15 +309,24 @@ impl Manager {
             {
                 return None;
             }
-            if hit != expected_hit as usize
-                && !(expected_hit == HTCLOSE
+            let recognized = expected_hits
+                .iter()
+                .copied()
+                .find(|expected| hit == *expected as usize);
+            let recognized = recognized.or_else(|| {
+                (expected_hits.contains(&HTCLOSE)
                     && hit == HTCLIENT as usize
                     && is_fork(pid)
                     && crate::accessibility::fork_close(point.x, point.y, pid))
-            {
+                .then_some(HTCLOSE)
+            });
+            let Some(recognized) = recognized else {
                 log(format!(
-                    "PASS THROUGH: hit-test={hit} expected={expected_hit}"
+                    "PASS THROUGH: hit-test={hit} expected={expected_hits:?}"
                 ));
+                return None;
+            };
+            if recognized == HTCAPTION && !ordinary(hwnd) {
                 return None;
             }
             let target = Target {
@@ -320,7 +335,8 @@ impl Manager {
                 tid,
                 rect: before,
             };
-            (same_target(target) && bounds(rect(hwnd)?) == bounds(before)).then_some(target)
+            (same_target(target) && bounds(rect(hwnd)?) == bounds(before))
+                .then_some((target, recognized))
         }
     }
 
@@ -359,6 +375,33 @@ impl Manager {
             ) == 0
             {
                 log(format!("FAIL topmost hwnd={:#x}", target.hwnd));
+            }
+        }
+    }
+
+    fn send_to_back(&self, target: Target) {
+        let hwnd = target.hwnd as HWND;
+        if !same_target(target)
+            || !visible_caption(hwnd)
+            || rect(hwnd).map(bounds) != Some(bounds(target.rect))
+            || integrity(target.pid) != Some(self.integrity)
+        {
+            log("CANCEL: send-to-back target changed after hit-test");
+            return;
+        }
+        // HWND_BOTTOM also clears Always on Top; keep geometry and activation unchanged.
+        unsafe {
+            if SetWindowPos(
+                hwnd,
+                HWND_BOTTOM,
+                0,
+                0,
+                0,
+                0,
+                SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE | SWP_NOOWNERZORDER | SWP_ASYNCWINDOWPOS,
+            ) == 0
+            {
+                log(format!("FAIL send-to-back hwnd={:#x}", target.hwnd));
             }
         }
     }
@@ -791,18 +834,21 @@ unsafe extern "system" fn mouse_hook(code: i32, message: WPARAM, data: LPARAM) -
             {
                 let (reply, receive) = mpsc::sync_channel(1);
                 if let Some(sender) = COMMANDS.get() {
-                    // A timed-out probe cannot resize anything: only the subsequent Toggle can.
+                    // A timed-out probe cannot change a window: only the subsequent command can.
                     let middle = message as u32 == WM_MBUTTONDOWN;
                     let probe = if middle {
                         Command::ProbeClose(event.pt, reply)
                     } else {
-                        Command::Probe(event.pt, reply)
+                        Command::ProbeRight(event.pt, reply)
                     };
                     if sender.try_send(probe).is_ok()
-                        && let Ok(Some(target)) = receive.recv_timeout(Duration::from_millis(40))
+                        && let Ok(Some((target, close))) =
+                            receive.recv_timeout(Duration::from_millis(40))
                         && sender
                             .try_send(if middle {
                                 Command::ToggleTopmost(target)
+                            } else if close {
+                                Command::SendToBack(target)
                             } else {
                                 Command::Toggle(target)
                             })
@@ -1428,12 +1474,14 @@ pub fn run() -> Result<(), String> {
                 50
             };
             match receiver.recv_timeout(Duration::from_millis(wait)) {
-                Ok(Command::Probe(point, reply)) => {
+                Ok(Command::ProbeRight(point, reply)) => {
                     let started = Instant::now();
                     let target = if STOPPING.load(Ordering::Relaxed) {
                         None
                     } else {
-                        manager.probe(point)
+                        manager
+                            .probe_hits(point, &[HTCAPTION, HTCLOSE])
+                            .map(|(target, hit)| (target, hit == HTCLOSE))
                     };
                     let _ = reply.try_send(target);
                     log(format!(
@@ -1449,12 +1497,17 @@ pub fn run() -> Result<(), String> {
                     let target = if STOPPING.load(Ordering::Relaxed) {
                         None
                     } else {
-                        manager.probe_hit(point, HTCLOSE)
+                        manager
+                            .probe_hit(point, HTCLOSE)
+                            .map(|target| (target, true))
                     };
                     let _ = reply.try_send(target);
                 }
                 Ok(Command::ToggleTopmost(target)) if !STOPPING.load(Ordering::Relaxed) => {
                     manager.toggle_topmost(target)
+                }
+                Ok(Command::SendToBack(target)) if !STOPPING.load(Ordering::Relaxed) => {
+                    manager.send_to_back(target)
                 }
                 Ok(Command::ProbeRolled(point, reply)) => {
                     let target = manager.probe(point).filter(|target| {
@@ -1664,6 +1717,15 @@ fn self_test(interactive: bool) -> Result<(), String> {
             x: initial.right - 25,
             y: point.y,
         };
+        for (point, expected) in [(point, HTCAPTION), (close_point, HTCLOSE)] {
+            if manager
+                .probe_hits(point, &[HTCAPTION, HTCLOSE])
+                .map(|(_, hit)| hit)
+                != Some(expected)
+            {
+                return Err("Right-click probe did not distinguish caption from Close".into());
+            }
+        }
         if manager.probe_hit(point, HTCLOSE).is_some()
             || manager
                 .probe_hit(
@@ -1680,11 +1742,14 @@ fn self_test(interactive: bool) -> Result<(), String> {
         }
         self_test_topmost(&manager, close_point, false)?;
         self_test_topmost(&manager, close_point, true)?;
+        self_test_send_to_back(&manager, close_point, second_hwnd, false)?;
+        self_test_send_to_back(&manager, close_point, second_hwnd, true)?;
         let mut stale = manager
             .probe_hit(close_point, HTCLOSE)
             .ok_or("Close unavailable")?;
         stale.pid = 0;
         manager.toggle_topmost(stale);
+        manager.send_to_back(stale);
         if unsafe { GetWindowLongW(hwnd, GWL_EXSTYLE) } as u32 & WS_EX_TOPMOST == 0 {
             return Err("Stale target changed topmost state".into());
         }
@@ -1736,6 +1801,7 @@ fn self_test(interactive: bool) -> Result<(), String> {
         manager.toggle(manager.probe(point).ok_or("Fixture caption unavailable")?);
         self_test_topmost(&manager, close_point, false)?;
         self_test_topmost(&manager, close_point, true)?;
+        self_test_send_to_back(&manager, close_point, second_hwnd, true)?;
         manager.windows.get_mut(&key).unwrap().fork = true;
         manager.maintain_rolled_size();
         if rect(hwnd).map(dimensions) != Some((800, rolled_height(dpi, true)))
@@ -2025,6 +2091,7 @@ fn self_test(interactive: bool) -> Result<(), String> {
         };
         self_test_topmost(&manager, maximized_close, false)?;
         self_test_topmost(&manager, maximized_close, true)?;
+        self_test_send_to_back(&manager, maximized_close, second_hwnd, true)?;
         unsafe {
             PostMessageW(hwnd, WM_SYSCOMMAND, SC_RESTORE as usize, 0);
         }
@@ -2116,6 +2183,102 @@ fn self_test_topmost(manager: &Manager, point: POINT, expected: bool) -> Result<
     }
     log(format!(
         "PASS Close-button Always on top={expected} with unchanged geometry"
+    ));
+    Ok(())
+}
+
+fn self_test_send_to_back(
+    manager: &Manager,
+    point: POINT,
+    other: HWND,
+    topmost: bool,
+) -> Result<(), String> {
+    let target = manager
+        .probe_hit(point, HTCLOSE)
+        .ok_or("Close unavailable")?;
+    let hwnd = target.hwnd as HWND;
+    let flags = SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE | SWP_NOOWNERZORDER | SWP_ASYNCWINDOWPOS;
+    let behind_other = || {
+        let mut next = unsafe { GetWindow(other, GW_HWNDNEXT) };
+        while !next.is_null() && next != hwnd {
+            next = unsafe { GetWindow(next, GW_HWNDNEXT) };
+        }
+        next == hwnd
+    };
+    unsafe {
+        SetWindowPos(other, HWND_NOTOPMOST, 0, 0, 0, 0, flags);
+        SetWindowPos(
+            hwnd,
+            if topmost {
+                HWND_TOPMOST
+            } else {
+                HWND_NOTOPMOST
+            },
+            0,
+            0,
+            0,
+            0,
+            flags,
+        );
+        SetWindowPos(hwnd, HWND_TOP, 0, 0, 0, 0, flags);
+    }
+    let deadline = Instant::now() + Duration::from_secs(1);
+    loop {
+        let ready = unsafe {
+            (GetWindowLongW(hwnd, GWL_EXSTYLE) as u32 & WS_EX_TOPMOST != 0) == topmost
+                && GetWindowLongW(other, GWL_EXSTYLE) as u32 & WS_EX_TOPMOST == 0
+                && GetAncestor(WindowFromPoint(point), GA_ROOT) == hwnd
+        };
+        if ready && !behind_other() {
+            break;
+        }
+        if Instant::now() >= deadline {
+            return Err("Send to Back fixture setup did not settle".into());
+        }
+        thread::sleep(Duration::from_millis(10));
+    }
+    let foreground = unsafe { GetForegroundWindow() };
+    manager.send_to_back(target);
+    let deadline = Instant::now() + Duration::from_secs(1);
+    loop {
+        if behind_other()
+            && unsafe { GetWindowLongW(hwnd, GWL_EXSTYLE) } as u32 & WS_EX_TOPMOST == 0
+        {
+            break;
+        }
+        if Instant::now() >= deadline {
+            return Err("Send to Back did not lower the fixture or clear Always on Top".into());
+        }
+        thread::sleep(Duration::from_millis(10));
+    }
+    if rect(hwnd).map(bounds) != Some(bounds(target.rect))
+        || !visible_caption(hwnd)
+        || unsafe { GetForegroundWindow() } != foreground
+    {
+        return Err("Send to Back changed geometry, visibility or activation".into());
+    }
+    // Restore fixture order so subsequent pointer probes still reach its caption.
+    unsafe {
+        SetWindowPos(other, HWND_TOPMOST, 0, 0, 0, 0, flags);
+        SetWindowPos(hwnd, HWND_TOPMOST, 0, 0, 0, 0, flags);
+    }
+    let deadline = Instant::now() + Duration::from_secs(1);
+    loop {
+        let ready = unsafe {
+            GetWindowLongW(hwnd, GWL_EXSTYLE) as u32 & WS_EX_TOPMOST != 0
+                && GetWindowLongW(other, GWL_EXSTYLE) as u32 & WS_EX_TOPMOST != 0
+                && GetAncestor(WindowFromPoint(point), GA_ROOT) == hwnd
+        };
+        if ready && !behind_other() {
+            break;
+        }
+        if Instant::now() >= deadline {
+            return Err("Send to Back fixture cleanup did not settle".into());
+        }
+        thread::sleep(Duration::from_millis(10));
+    }
+    log(format!(
+        "PASS Close-button Send to Back (initial topmost={topmost}) with unchanged geometry and activation"
     ));
     Ok(())
 }
