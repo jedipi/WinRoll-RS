@@ -72,22 +72,18 @@ WinRoll saves the window's original size and position so it can restore them exa
 Middle-click a window's **Close (X)** button to toggle Always on Top. Middle-click
 it again to turn it off. 
 
+### Send to Back
+
+Right-click a window's **Close (X)** button to send it behind other windows without
+minimizing it or changing its size or position. 
+
 ## Options
 
 Open **Options...** from the WinRoll RS tray menu to open **Options**. Select
 **Automatically start with Windows** to launch WinRoll RS when you sign in, or
-clear it to disable startup. Changes are saved immediately for the current user;
-administrator privileges are not required. Startup is off by default.
-
-For the portable version, keep the executable at the same location after enabling
-startup. Disable startup before moving or deleting it, then enable it again from
-the new location if needed. The installer removes the startup entry on uninstall.
+clear it to disable startup.
 
 ## Planned features
-
-### Send to Back
-
-Send the selected window behind other windows without minimizing it.
 
 ### Transparency
 
@@ -124,7 +120,7 @@ Initial planned controls:
 | Roll Up / Roll Down | Right-click title bar |
 | Transparency | Middle-click title bar |
 | Always on Top (available now) | Middle-click Close button |
-| Send to Back | Right-click Close button |
+| Send to Back (available now) | Right-click Close button |
 | Minimize to Tray | Middle-click Minimize button |
 
 Mouse actions will eventually be configurable.
