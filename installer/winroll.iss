@@ -44,6 +44,9 @@ Source: "{#PackageDir}\SHA256SUMS.txt"; DestDir: "{app}"; Flags: ignoreversion
 Name: "{group}\WinRoll RS"; Filename: "{app}\winroll.exe"
 Name: "{group}\Uninstall WinRoll RS"; Filename: "{uninstallexe}"
 
+[Registry]
+Root: HKCU; Subkey: "Software\Microsoft\Windows\CurrentVersion\Run"; ValueName: "WinRoll RS"; Flags: dontcreatekey uninsdeletevalue
+
 [Code]
 function InitializeSetup: Boolean;
 begin

@@ -19,7 +19,10 @@ Permission is granted to anyone to use this software for any purpose, including 
 
 3. This notice may not be removed or altered from any distribution.
 
-windows-sys 0.61.2 and windows-link 0.2.1
+Microsoft Windows bindings: windows-sys 0.61.2, windows-link 0.2.1,
+windows 0.62.2, windows-core 0.62.2, windows-collections 0.3.2,
+windows-future 0.3.2, windows-numerics 0.3.1, windows-result 0.4.1,
+windows-strings 0.5.1 and windows-threading 0.2.1
 Source: https://github.com/microsoft/windows-rs
 Used under their MIT license option:
 

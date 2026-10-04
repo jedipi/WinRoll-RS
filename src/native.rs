@@ -18,6 +18,7 @@ use windows_sys::{
         Security::*,
         System::{Console::*, LibraryLoader::*, Threading::*},
         UI::{
+            Controls::{BST_CHECKED, BST_UNCHECKED},
             HiDpi::*,
             Input::KeyboardAndMouse::{
                 GetAsyncKeyState, INPUT, INPUT_0, INPUT_KEYBOARD, KEYBDINPUT, KEYEVENTF_KEYUP,
@@ -40,17 +41,20 @@ static TASKBAR_CREATED: OnceLock<u32> = OnceLock::new();
 static TRAY_ICONS: OnceLock<Option<(isize, isize)>> = OnceLock::new();
 static HAS_ROLLED_WINDOWS: AtomicBool = AtomicBool::new(false);
 static ABOUT_WINDOW: AtomicIsize = AtomicIsize::new(0);
+static OPTIONS_WINDOW: AtomicIsize = AtomicIsize::new(0);
 const ENABLE: u32 = 1;
 const UNROLL_ALL: u32 = 2;
 const PAUSE: u32 = 4;
 const EXIT: u32 = 8;
 const ABOUT: u32 = 16;
+const SETTINGS: u32 = 32;
 const TRAY_CALLBACK: u32 = WM_APP + 1;
 const TRAY_UPDATE: u32 = WM_APP + 2;
 const WORKER_DONE: u32 = WM_APP + 3;
 const NIN_KEYSELECT: u32 = NIN_SELECT | NINF_KEY;
 const ALT_TAP_TAG: usize = 0x0057_494e_414c_5421;
 static SUPPRESS_UP: AtomicBool = AtomicBool::new(false);
+static SUPPRESS_MIDDLE_UP: AtomicBool = AtomicBool::new(false);
 static STOPPING: AtomicBool = AtomicBool::new(false);
 static DRAG: Mutex<Option<Drag>> = Mutex::new(None);
 static DRAG_POSITION: Mutex<Option<DragPosition>> = Mutex::new(None);
@@ -69,9 +73,11 @@ struct Target {
 }
 enum Command {
     Probe(POINT, SyncSender<Option<Target>>),
+    ProbeClose(POINT, SyncSender<Option<Target>>),
     ProbeRolled(POINT, SyncSender<Option<Target>>),
     FocusRolled(isize, Instant),
     Toggle(Target),
+    ToggleTopmost(Target),
 }
 struct Drag {
     target: Target,
@@ -189,14 +195,12 @@ fn integrity(pid: u32) -> Option<u32> {
     }
 }
 
-fn ordinary(hwnd: HWND) -> bool {
+fn visible_caption(hwnd: HWND) -> bool {
     // SAFETY: query-only Win32 calls on an opaque handle; failure rejects the window.
     unsafe {
         let mut cloaked: u32 = 0;
         IsWindowVisible(hwnd) != 0
             && IsIconic(hwnd) == 0
-            && IsZoomed(hwnd) == 0
-            && IsWindowArranged(hwnd) == 0
             && GetAncestor(hwnd, GA_ROOT) == hwnd
             && GetWindowLongW(hwnd, GWL_STYLE) as u32 & WS_CAPTION == WS_CAPTION
             && DwmGetWindowAttribute(
@@ -207,6 +211,10 @@ fn ordinary(hwnd: HWND) -> bool {
             ) >= 0
             && cloaked == 0
     }
+}
+
+fn ordinary(hwnd: HWND) -> bool {
+    visible_caption(hwnd) && unsafe { IsZoomed(hwnd) == 0 && IsWindowArranged(hwnd) == 0 }
 }
 
 fn same_target(target: Target) -> bool {
@@ -237,11 +245,19 @@ impl Manager {
     }
 
     fn probe(&self, point: POINT) -> Option<Target> {
+        self.probe_hit(point, HTCAPTION)
+    }
+
+    fn probe_hit(&self, point: POINT, expected_hit: u32) -> Option<Target> {
         // SAFETY: Windows validates window handles and the writable output pointers.
         unsafe {
             let under_pointer = WindowFromPoint(point);
             let hwnd = GetAncestor(under_pointer, GA_ROOT);
-            if hwnd.is_null() || hwnd == GetConsoleWindow() || !ordinary(hwnd) {
+            if hwnd.is_null()
+                || hwnd == GetConsoleWindow()
+                || !visible_caption(hwnd)
+                || (expected_hit == HTCAPTION && !ordinary(hwnd))
+            {
                 log(format!(
                     "PASS THROUGH: ineligible hwnd={:#x} snapped={} maximized={} minimized={}",
                     hwnd as usize,
@@ -287,8 +303,15 @@ impl Manager {
             {
                 return None;
             }
-            if hit != HTCAPTION as usize {
-                log(format!("PASS THROUGH: hit-test={hit} (caption=2)"));
+            if hit != expected_hit as usize
+                && !(expected_hit == HTCLOSE
+                    && hit == HTCLIENT as usize
+                    && is_fork(pid)
+                    && crate::accessibility::fork_close(point.x, point.y, pid))
+            {
+                log(format!(
+                    "PASS THROUGH: hit-test={hit} expected={expected_hit}"
+                ));
                 return None;
             }
             let target = Target {
@@ -306,6 +329,38 @@ impl Manager {
             && unsafe {
                 GetPropW(saved.target.hwnd as HWND, self.property.as_ptr()) as usize == saved.marker
             }
+    }
+
+    fn toggle_topmost(&self, target: Target) {
+        let hwnd = target.hwnd as HWND;
+        if !same_target(target)
+            || !visible_caption(hwnd)
+            || rect(hwnd).map(bounds) != Some(bounds(target.rect))
+            || integrity(target.pid) != Some(self.integrity)
+        {
+            log("CANCEL: topmost target changed after hit-test");
+            return;
+        }
+        // Use the current native state, including topmost set by the target or another utility.
+        unsafe {
+            let topmost = GetWindowLongW(hwnd, GWL_EXSTYLE) as u32 & WS_EX_TOPMOST != 0;
+            if SetWindowPos(
+                hwnd,
+                if topmost {
+                    HWND_NOTOPMOST
+                } else {
+                    HWND_TOPMOST
+                },
+                0,
+                0,
+                0,
+                0,
+                SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE | SWP_NOOWNERZORDER | SWP_ASYNCWINDOWPOS,
+            ) == 0
+            {
+                log(format!("FAIL topmost hwnd={:#x}", target.hwnd));
+            }
+        }
     }
 
     fn toggle(&mut self, target: Target) {
@@ -662,6 +717,9 @@ unsafe extern "system" fn mouse_hook(code: i32, message: WPARAM, data: LPARAM) -
             if message as u32 == WM_RBUTTONUP && SUPPRESS_UP.swap(false, Ordering::Relaxed) {
                 return 1;
             }
+            if message as u32 == WM_MBUTTONUP && SUPPRESS_MIDDLE_UP.swap(false, Ordering::Relaxed) {
+                return 1;
+            }
             let event = &*(data as *const MSLLHOOKSTRUCT);
             if matches!(message as u32, WM_MOUSEMOVE | WM_LBUTTONUP)
                 && let Ok(mut active) = DRAG.lock()
@@ -727,18 +785,34 @@ unsafe extern "system" fn mouse_hook(code: i32, message: WPARAM, data: LPARAM) -
                     *active = None;
                 }
             }
-            if message as u32 == WM_RBUTTONDOWN
+            if matches!(message as u32, WM_RBUTTONDOWN | WM_MBUTTONDOWN)
                 && event.flags & LLMHF_LOWER_IL_INJECTED == 0
                 && !STOPPING.load(Ordering::Relaxed)
             {
                 let (reply, receive) = mpsc::sync_channel(1);
                 if let Some(sender) = COMMANDS.get() {
                     // A timed-out probe cannot resize anything: only the subsequent Toggle can.
-                    if sender.try_send(Command::Probe(event.pt, reply)).is_ok()
+                    let middle = message as u32 == WM_MBUTTONDOWN;
+                    let probe = if middle {
+                        Command::ProbeClose(event.pt, reply)
+                    } else {
+                        Command::Probe(event.pt, reply)
+                    };
+                    if sender.try_send(probe).is_ok()
                         && let Ok(Some(target)) = receive.recv_timeout(Duration::from_millis(40))
-                        && sender.try_send(Command::Toggle(target)).is_ok()
+                        && sender
+                            .try_send(if middle {
+                                Command::ToggleTopmost(target)
+                            } else {
+                                Command::Toggle(target)
+                            })
+                            .is_ok()
                     {
-                        SUPPRESS_UP.store(true, Ordering::Relaxed);
+                        if middle {
+                            SUPPRESS_MIDDLE_UP.store(true, Ordering::Relaxed);
+                        } else {
+                            SUPPRESS_UP.store(true, Ordering::Relaxed);
+                        }
                         return 1;
                     }
                 }
@@ -913,18 +987,135 @@ unsafe extern "system" fn about_proc(hwnd: HWND, message: u32, w: WPARAM, l: LPA
     }
 }
 
-fn show_about(owner: HWND) {
+fn options_error(owner: HWND, error: &io::Error) {
+    let text: Vec<u16> = format!("Cannot access the Windows startup setting.\n\n{error}")
+        .encode_utf16()
+        .chain(Some(0))
+        .collect();
     unsafe {
-        let existing = ABOUT_WINDOW.load(Ordering::Relaxed) as HWND;
+        MessageBoxW(
+            owner,
+            text.as_ptr(),
+            w!("WinRoll RS Options"),
+            MB_OK | MB_ICONERROR,
+        )
+    };
+}
+
+unsafe extern "system" fn options_proc(hwnd: HWND, message: u32, w: WPARAM, l: LPARAM) -> LRESULT {
+    // SAFETY: this thread owns the options window and its standard child controls.
+    unsafe {
+        match message {
+            WM_CREATE => {
+                let enabled = match crate::startup::enabled() {
+                    Ok(enabled) => enabled,
+                    Err(error) => {
+                        options_error(hwnd, &error);
+                        return -1;
+                    }
+                };
+                let dpi = GetDpiForWindow(hwnd) as i32;
+                let scale = |n| n * dpi / 96;
+                for (id, text, style, x, y, width, height) in [
+                    (
+                        3,
+                        w!("&Automatically start with Windows"),
+                        BS_AUTOCHECKBOX,
+                        20,
+                        22,
+                        300,
+                        28,
+                    ),
+                    (2, w!("Close"), BS_DEFPUSHBUTTON, 236, 80, 80, 28),
+                ] {
+                    let control = CreateWindowExW(
+                        0,
+                        w!("BUTTON"),
+                        text,
+                        WS_CHILD | WS_VISIBLE | WS_TABSTOP | style as u32,
+                        scale(x),
+                        scale(y),
+                        scale(width),
+                        scale(height),
+                        hwnd,
+                        id as HMENU,
+                        GetModuleHandleW(null_mut()),
+                        null_mut(),
+                    );
+                    if control.is_null() {
+                        return -1;
+                    }
+                    SendMessageW(
+                        control,
+                        WM_SETFONT,
+                        GetStockObject(DEFAULT_GUI_FONT) as usize,
+                        1,
+                    );
+                }
+                let checkbox = GetDlgItem(hwnd, 3);
+                SendMessageW(
+                    checkbox,
+                    BM_SETCHECK,
+                    if enabled { BST_CHECKED } else { BST_UNCHECKED } as usize,
+                    0,
+                );
+                SetFocus(checkbox);
+                return 0;
+            }
+            WM_COMMAND if w & 0xffff == 3 && (w >> 16) == BN_CLICKED as usize => {
+                let checkbox = GetDlgItem(hwnd, 3);
+                let enabled = SendMessageW(checkbox, BM_GETCHECK, 0, 0) == BST_CHECKED as isize;
+                if let Err(error) = crate::startup::set_enabled(enabled) {
+                    SendMessageW(
+                        checkbox,
+                        BM_SETCHECK,
+                        if enabled { BST_UNCHECKED } else { BST_CHECKED } as usize,
+                        0,
+                    );
+                    options_error(hwnd, &error);
+                }
+                return 0;
+            }
+            WM_COMMAND if matches!(w & 0xffff, 1 | 2) => {
+                DestroyWindow(hwnd);
+                return 0;
+            }
+            WM_CLOSE => {
+                DestroyWindow(hwnd);
+                return 0;
+            }
+            WM_DESTROY => {
+                OPTIONS_WINDOW.store(0, Ordering::Relaxed);
+                return 0;
+            }
+            _ => {}
+        }
+        DefWindowProcW(hwnd, message, w, l)
+    }
+}
+
+fn show_auxiliary(owner: HWND, options: bool) {
+    unsafe {
+        let window = if options {
+            &OPTIONS_WINDOW
+        } else {
+            &ABOUT_WINDOW
+        };
+        let existing = window.load(Ordering::Relaxed) as HWND;
         if !existing.is_null() {
             SetForegroundWindow(existing);
             return;
         }
         let class = WNDCLASSW {
-            lpfnWndProc: Some(about_proc),
+            lpfnWndProc: Some(if options { options_proc } else { about_proc }),
             hInstance: GetModuleHandleW(null_mut()),
-            hbrBackground: GetSysColorBrush(COLOR_WINDOW),
-            lpszClassName: w!("WinRollAbout"),
+            hbrBackground: GetSysColorBrush(if options { COLOR_BTNFACE } else { COLOR_WINDOW }),
+            hCursor: LoadCursorW(null_mut(), IDC_ARROW),
+            lpszClassName: if options {
+                w!("WinRollOptions")
+            } else {
+                w!("WinRollAbout")
+            },
             ..Default::default()
         };
         RegisterClassW(&class);
@@ -944,8 +1135,8 @@ fn show_about(owner: HWND) {
         let mut bounds = RECT {
             left: 0,
             top: 0,
-            right: 320 * dpi as i32 / 96,
-            bottom: 150 * dpi as i32 / 96,
+            right: (if options { 340 } else { 320 }) * dpi as i32 / 96,
+            bottom: (if options { 128 } else { 150 }) * dpi as i32 / 96,
         };
         let style = WS_OVERLAPPED | WS_CAPTION | WS_SYSMENU;
         AdjustWindowRectExForDpi(&mut bounds, style, 0, WS_EX_DLGMODALFRAME, dpi);
@@ -954,7 +1145,11 @@ fn show_about(owner: HWND) {
         let hwnd = CreateWindowExW(
             WS_EX_DLGMODALFRAME,
             class.lpszClassName,
-            w!("About WinRoll RS"),
+            if options {
+                w!("Options")
+            } else {
+                w!("About WinRoll RS")
+            },
             style,
             info.rcWork.left + (info.rcWork.right - info.rcWork.left - width) / 2,
             info.rcWork.top + (info.rcWork.bottom - info.rcWork.top - height) / 2,
@@ -966,12 +1161,15 @@ fn show_about(owner: HWND) {
             null_mut(),
         );
         if !hwnd.is_null() {
-            ABOUT_WINDOW.store(hwnd as isize, Ordering::Relaxed);
+            window.store(hwnd as isize, Ordering::Relaxed);
             if let Some(Some((expanded, _))) = TRAY_ICONS.get() {
                 SendMessageW(hwnd, WM_SETICON, ICON_SMALL as usize, *expanded);
             }
             ShowWindow(hwnd, SW_SHOW);
             SetForegroundWindow(hwnd);
+            if options {
+                SetFocus(GetDlgItem(hwnd, 3));
+            }
         }
     }
 }
@@ -1035,6 +1233,7 @@ unsafe extern "system" fn tray_proc(hwnd: HWND, message: u32, w: WPARAM, l: LPAR
                     },
                 );
                 AppendMenuW(menu, MF_SEPARATOR, 0, std::ptr::null());
+                AppendMenuW(menu, MF_STRING, SETTINGS as usize, w!("&Options..."));
                 AppendMenuW(menu, MF_STRING, ABOUT as usize, w!("&About WinRoll RS"));
                 AppendMenuW(menu, MF_STRING, EXIT as usize, w!("E&xit"));
                 // Version 4 supplies the icon anchor for keyboard as well as mouse activation.
@@ -1054,7 +1253,10 @@ unsafe extern "system" fn tray_proc(hwnd: HWND, message: u32, w: WPARAM, l: LPAR
                 PostMessageW(hwnd, WM_NULL, 0, 0);
                 tray_icon(hwnd, NIM_SETFOCUS);
                 if action == ABOUT {
-                    show_about(hwnd);
+                    show_auxiliary(hwnd, false);
+                }
+                if action == SETTINGS {
+                    show_auxiliary(hwnd, true);
                 }
                 if matches!(action, ENABLE | PAUSE | UNROLL_ALL | EXIT) {
                     request_control(action);
@@ -1173,6 +1375,7 @@ pub fn run() -> Result<(), String> {
     }
     let tray_key = tray as isize;
     let worker = thread::spawn(move || {
+        crate::accessibility::initialize();
         loop {
             let requests = CONTROL_REQUESTS.swap(0, Ordering::Relaxed);
             if requests != 0 {
@@ -1242,6 +1445,17 @@ pub fn run() -> Result<(), String> {
                 Ok(Command::Toggle(target)) if !STOPPING.load(Ordering::Relaxed) => {
                     manager.toggle(target)
                 }
+                Ok(Command::ProbeClose(point, reply)) => {
+                    let target = if STOPPING.load(Ordering::Relaxed) {
+                        None
+                    } else {
+                        manager.probe_hit(point, HTCLOSE)
+                    };
+                    let _ = reply.try_send(target);
+                }
+                Ok(Command::ToggleTopmost(target)) if !STOPPING.load(Ordering::Relaxed) => {
+                    manager.toggle_topmost(target)
+                }
                 Ok(Command::ProbeRolled(point, reply)) => {
                     let target = manager.probe(point).filter(|target| {
                         manager
@@ -1276,6 +1490,10 @@ pub fn run() -> Result<(), String> {
         if !about.is_null() {
             DestroyWindow(about);
         }
+        let options = OPTIONS_WINDOW.load(Ordering::Relaxed) as HWND;
+        if !options.is_null() {
+            DestroyWindow(options);
+        }
         if let Some(Some((expanded, rolled))) = TRAY_ICONS.get() {
             DestroyIcon(*expanded as HICON);
             DestroyIcon(*rolled as HICON);
@@ -1294,6 +1512,10 @@ fn pump_until_restored() {
             if GetMessageW(&mut msg, null_mut(), 0, 0) <= 0 {
                 request_control(EXIT);
                 thread::sleep(Duration::from_millis(50));
+                continue;
+            }
+            let options = OPTIONS_WINDOW.load(Ordering::Relaxed) as HWND;
+            if !options.is_null() && IsDialogMessageW(options, &msg) != 0 {
                 continue;
             }
             TranslateMessage(&msg);
@@ -1438,6 +1660,34 @@ fn self_test(interactive: bool) -> Result<(), String> {
                         + 10
                 },
         };
+        let close_point = POINT {
+            x: initial.right - 25,
+            y: point.y,
+        };
+        if manager.probe_hit(point, HTCLOSE).is_some()
+            || manager
+                .probe_hit(
+                    POINT {
+                        x: initial.left + 200,
+                        y: initial.top + 200,
+                    },
+                    HTCLOSE,
+                )
+                .is_some()
+            || manager.probe(close_point).is_some()
+        {
+            return Err("Close and caption gestures did not reject other hit regions".into());
+        }
+        self_test_topmost(&manager, close_point, false)?;
+        self_test_topmost(&manager, close_point, true)?;
+        let mut stale = manager
+            .probe_hit(close_point, HTCLOSE)
+            .ok_or("Close unavailable")?;
+        stale.pid = 0;
+        manager.toggle_topmost(stale);
+        if unsafe { GetWindowLongW(hwnd, GWL_EXSTYLE) } as u32 & WS_EX_TOPMOST == 0 {
+            return Err("Stale target changed topmost state".into());
+        }
         if manager
             .probe(POINT {
                 x: initial.left + 200,
@@ -1484,6 +1734,8 @@ fn self_test(interactive: bool) -> Result<(), String> {
             log(format!("PASS native cycle {cycle}/20"));
         }
         manager.toggle(manager.probe(point).ok_or("Fixture caption unavailable")?);
+        self_test_topmost(&manager, close_point, false)?;
+        self_test_topmost(&manager, close_point, true)?;
         manager.windows.get_mut(&key).unwrap().fork = true;
         manager.maintain_rolled_size();
         if rect(hwnd).map(dimensions) != Some((800, rolled_height(dpi, true)))
@@ -1766,6 +2018,13 @@ fn self_test(interactive: bool) -> Result<(), String> {
         if unsafe { IsZoomed(hwnd) } == 0 || ordinary(hwnd) {
             return Err("Maximized fixture not excluded".into());
         }
+        let maximized = rect(hwnd).ok_or("Maximized fixture unavailable")?;
+        let maximized_close = POINT {
+            x: maximized.right - 25,
+            y: maximized.top + caption_height(unsafe { GetDpiForWindow(hwnd) }) / 2,
+        };
+        self_test_topmost(&manager, maximized_close, false)?;
+        self_test_topmost(&manager, maximized_close, true)?;
         unsafe {
             PostMessageW(hwnd, WM_SYSCOMMAND, SC_RESTORE as usize, 0);
         }
@@ -1831,7 +2090,84 @@ fn self_test(interactive: bool) -> Result<(), String> {
         .join()
         .map_err(|_| "Second fixture thread panicked")?;
     result?;
+    self_test_options()?;
     self_test_menu_exit()
+}
+
+fn self_test_topmost(manager: &Manager, point: POINT, expected: bool) -> Result<(), String> {
+    let target = manager
+        .probe_hit(point, HTCLOSE)
+        .ok_or("Fixture Close button was not eligible")?;
+    manager.toggle_topmost(target);
+    let hwnd = target.hwnd as HWND;
+    let deadline = Instant::now() + Duration::from_secs(1);
+    loop {
+        let topmost = unsafe { GetWindowLongW(hwnd, GWL_EXSTYLE) } as u32 & WS_EX_TOPMOST != 0;
+        if topmost == expected {
+            break;
+        }
+        if Instant::now() >= deadline {
+            return Err("Always on top did not toggle the native flag".into());
+        }
+        thread::sleep(Duration::from_millis(10));
+    }
+    if rect(hwnd).map(bounds) != Some(bounds(target.rect)) {
+        return Err("Always on top changed window geometry".into());
+    }
+    log(format!(
+        "PASS Close-button Always on top={expected} with unchanged geometry"
+    ));
+    Ok(())
+}
+
+fn self_test_options() -> Result<(), String> {
+    let enabled = crate::startup::enabled().map_err(|error| error.to_string())?;
+    // Read the real preference, but never click the checkbox or change startup in this UI check.
+    unsafe {
+        show_auxiliary(null_mut(), true);
+        let hwnd = OPTIONS_WINDOW.load(Ordering::Relaxed) as HWND;
+        if hwnd.is_null() {
+            return Err("Cannot create Options window".into());
+        }
+        let result = (|| -> Result<(), String> {
+            let checkbox = GetDlgItem(hwnd, 3);
+            let close = GetDlgItem(hwnd, 2);
+            if checkbox.is_null()
+                || close.is_null()
+                || windows_sys::Win32::UI::Input::KeyboardAndMouse::GetFocus() != checkbox
+                || (SendMessageW(checkbox, BM_GETCHECK, 0, 0) == BST_CHECKED as isize) != enabled
+            {
+                return Err("Options does not reflect the saved startup preference".into());
+            }
+            show_auxiliary(null_mut(), true);
+            if OPTIONS_WINDOW.load(Ordering::Relaxed) != hwnd as isize {
+                return Err("Options menu item opened a duplicate Options window".into());
+            }
+            SetFocus(checkbox);
+            let tab = MSG {
+                hwnd: checkbox,
+                message: WM_KEYDOWN,
+                wParam: 9, // VK_TAB
+                ..Default::default()
+            };
+            if IsDialogMessageW(hwnd, &tab) == 0
+                || windows_sys::Win32::UI::Input::KeyboardAndMouse::GetFocus() != close
+            {
+                return Err("Options keyboard navigation did not focus Close".into());
+            }
+            SendMessageW(hwnd, WM_COMMAND, 2, close as isize);
+            if OPTIONS_WINDOW.load(Ordering::Relaxed) != 0 || IsWindow(hwnd) != 0 {
+                return Err("Close did not destroy the Options window".into());
+            }
+            Ok(())
+        })();
+        if IsWindow(hwnd) != 0 {
+            DestroyWindow(hwnd);
+        }
+        result?;
+    }
+    log("PASS Options startup preference, window reuse, keyboard navigation and Close");
+    Ok(())
 }
 
 fn self_test_menu_exit() -> Result<(), String> {

@@ -67,18 +67,23 @@ Rolled window:
 
 WinRoll saves the window's original size and position so it can restore them exactly when you roll it down.
 
-## Planned features
-
-### Window roll up
-
-Right-click a window's title bar to 
-- ~~roll it up~~
-- ~~roll it back down~~
-- ~~preserving its original size and position.~~
-
 ### Always on Top
 
-Choose whether a window stays above other windows.
+Middle-click a window's **Close (X)** button to toggle Always on Top. Middle-click
+it again to turn it off. 
+
+## Options
+
+Open **Options...** from the WinRoll RS tray menu to open **Options**. Select
+**Automatically start with Windows** to launch WinRoll RS when you sign in, or
+clear it to disable startup. Changes are saved immediately for the current user;
+administrator privileges are not required. Startup is off by default.
+
+For the portable version, keep the executable at the same location after enabling
+startup. Disable startup before moving or deleting it, then enable it again from
+the new location if needed. The installer removes the startup entry on uninstall.
+
+## Planned features
 
 ### Send to Back
 
@@ -100,11 +105,11 @@ WinRoll runs in the Windows notification area.
 
 The planned tray menu includes:
 
-- Settings
+- Options (available now)
 - Rolled windows
 - Hidden windows
 - Enable / Disable WinRoll
-- Start with Windows
+- Start with Windows (available in Options)
 - About
 - Exit
 
@@ -118,7 +123,7 @@ Initial planned controls:
 |---|---|
 | Roll Up / Roll Down | Right-click title bar |
 | Transparency | Middle-click title bar |
-| Always on Top | Middle-click Close button |
+| Always on Top (available now) | Middle-click Close button |
 | Send to Back | Right-click Close button |
 | Minimize to Tray | Middle-click Minimize button |
 

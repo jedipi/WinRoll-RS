@@ -3,8 +3,10 @@
 #[cfg(not(all(target_os = "windows", target_arch = "x86_64", target_env = "msvc")))]
 compile_error!("WinRoll RS requires x86_64-pc-windows-msvc.");
 
+mod accessibility;
 mod geometry;
 mod native;
+mod startup;
 
 fn main() {
     if let Err(error) = native::run() {
