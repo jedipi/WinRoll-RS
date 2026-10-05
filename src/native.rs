@@ -301,8 +301,7 @@ impl Manager {
             let y = i16::try_from(point.y).ok()?;
             let packed = ((u32::from(y as u16) << 16) | u32::from(x as u16)) as isize;
             let mut hit = 0;
-            // Modern frames may host captions in a child HWND. Its hit result is authoritative;
-            // never override an interactive child with a parent's less specific caption result.
+            // Child hits normally win, so controls cannot be overridden by a parent caption.
             if SendMessageTimeoutW(
                 under_pointer,
                 WM_NCHITTEST,
@@ -314,6 +313,37 @@ impl Manager {
             ) == 0
             {
                 return None;
+            }
+            // UWP's CoreWindow covers the host caption but reports HTCLIENT there.
+            // Only this direct child/frame pair delegates caption recognition to the host.
+            if hit == HTCLIENT as usize
+                && expected_hits.contains(&HTCAPTION)
+                && GetParent(under_pointer) == hwnd
+                && [
+                    (under_pointer, "Windows.UI.Core.CoreWindow"),
+                    (hwnd, "ApplicationFrameWindow"),
+                ]
+                .iter()
+                .all(|(window, expected)| {
+                    let mut class = [0u16; 64];
+                    let length = GetClassNameW(*window, class.as_mut_ptr(), class.len() as i32);
+                    String::from_utf16_lossy(&class[..length as usize]) == *expected
+                })
+            {
+                let mut frame_hit = 0;
+                if SendMessageTimeoutW(
+                    hwnd,
+                    WM_NCHITTEST,
+                    0,
+                    packed,
+                    SMTO_ABORTIFHUNG | SMTO_BLOCK,
+                    20,
+                    &mut frame_hit,
+                ) != 0
+                    && frame_hit == HTCAPTION as usize
+                {
+                    hit = frame_hit;
+                }
             }
             let recognized = expected_hits
                 .iter()
