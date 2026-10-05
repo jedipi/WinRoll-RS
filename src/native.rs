@@ -1697,7 +1697,7 @@ unsafe extern "system" fn tray_proc(hwnd: HWND, message: u32, w: WPARAM, l: LPAR
                 );
                 AppendMenuW(menu, MF_SEPARATOR, 0, std::ptr::null());
                 AppendMenuW(menu, MF_STRING, SETTINGS as usize, w!("&Options..."));
-                AppendMenuW(menu, MF_STRING, ABOUT as usize, w!("&About WinRoll RS"));
+                AppendMenuW(menu, MF_STRING, ABOUT as usize, w!("&About..."));
                 AppendMenuW(menu, MF_STRING, EXIT as usize, w!("E&xit"));
                 // Version 4 supplies the icon anchor for keyboard as well as mouse activation.
                 let x = w as i16 as i32;
