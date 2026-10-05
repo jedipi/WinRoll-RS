@@ -85,9 +85,25 @@ Middle-click an empty title-bar area to toggle the configured transparency. Midd
 again to restore the window's original appearance. Pause keeps the current appearance
 and disables the gesture; Unroll all leaves transparency unchanged.
 
-At 100% the window is invisible and cannot be clicked. Use **Restore transparency**
-in the WinRoll RS tray menu to restore all affected windows, or **Exit** to restore
-them before quitting. Applications that use per-pixel layered rendering are excluded.
+At 100% the window is invisible and cannot be clicked. Choose **Exit** in the
+WinRoll RS tray menu to restore affected windows before quitting. Applications
+that use per-pixel layered rendering are excluded.
+
+### Minimize to Tray
+
+Middle-click a window's **Minimize** button to hide it from the desktop and taskbar
+and give it a notification-area icon. Click that icon to show the window again.
+Check the hidden-icons overflow if the icon is not immediately visible.
+
+Pause disables the gesture but keeps hidden windows available through their icons.
+Unroll all leaves them hidden. Exit shows them before quitting, preserving their
+normal or maximized state; restoring an individual rolled window keeps it rolled.
+If a window cannot be shown, WinRoll keeps its icon and lets you retry.
+
+The button must report the native Minimize hit region; custom controls that do not
+report it and windows running at a different integrity level retain their normal clicks.
+Exit WinRoll through its tray before ending its process: hidden-window state is held
+in memory and cannot be recovered by restarting WinRoll after a forced termination.
 
 ## Options
 
@@ -108,6 +124,10 @@ Hide selected windows from the desktop and taskbar, then restore them from the W
 ### System tray
 
 WinRoll runs in the Windows notification area.
+
+WinRoll starts enabled. Left-click its tray icon to pause; left-click again to
+enable it. Right-click the icon to open the menu. While Exit recovery is pending,
+use the menu to retry restoration before enabling gestures again.
 
 The planned tray menu includes:
 

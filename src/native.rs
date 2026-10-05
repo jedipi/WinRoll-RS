@@ -32,6 +32,8 @@ use windows_sys::{
     core::w,
 };
 
+mod tray_windows;
+
 static COMMANDS: OnceLock<SyncSender<Command>> = OnceLock::new();
 static CONTROL_REQUESTS: AtomicU32 = AtomicU32::new(0);
 static RECOVERY_PENDING: AtomicBool = AtomicBool::new(false);
@@ -43,18 +45,21 @@ static HAS_ROLLED_WINDOWS: AtomicBool = AtomicBool::new(false);
 static ABOUT_WINDOW: AtomicIsize = AtomicIsize::new(0);
 static OPTIONS_WINDOW: AtomicIsize = AtomicIsize::new(0);
 static TRANSPARENCY: AtomicU32 = AtomicU32::new(50);
+static RESTORE_TRAY_REQUESTS: Mutex<Vec<u32>> = Mutex::new(Vec::new());
 const ENABLE: u32 = 1;
 const UNROLL_ALL: u32 = 2;
 const PAUSE: u32 = 4;
 const EXIT: u32 = 8;
 const ABOUT: u32 = 16;
 const SETTINGS: u32 = 32;
-const RESTORE_TRANSPARENCY: u32 = 64;
+const RECREATE_TRAY: u32 = 256;
+const TOGGLE_ENABLED: u32 = 512;
 // TBM_GETPOS is WM_USER, omitted by the windows-sys metadata.
 const TBM_GETPOS: u32 = WM_USER;
 const TRAY_CALLBACK: u32 = WM_APP + 1;
 const TRAY_UPDATE: u32 = WM_APP + 2;
 const WORKER_DONE: u32 = WM_APP + 3;
+const WINDOW_TRAY_CALLBACK: u32 = WM_APP + 4;
 const NIN_KEYSELECT: u32 = NIN_SELECT | NINF_KEY;
 const ALT_TAP_TAG: usize = 0x0057_494e_414c_5421;
 static SUPPRESS_UP: AtomicBool = AtomicBool::new(false);
@@ -67,6 +72,8 @@ static DRAG_ACTIVE: AtomicBool = AtomicBool::new(false);
 static FIXTURE_REFUSES_EXPANSION: AtomicIsize = AtomicIsize::new(0);
 static FIXTURE_MIN_TRACK: AtomicBool = AtomicBool::new(false);
 static FIXTURE_CAPTION_EVERYWHERE: AtomicBool = AtomicBool::new(false);
+static FIXTURE_REFUSES_SHOW: AtomicIsize = AtomicIsize::new(0);
+static FIXTURE_DELAYS_HIDE: AtomicIsize = AtomicIsize::new(0);
 
 #[derive(Clone, Copy)]
 struct Target {
@@ -76,14 +83,15 @@ struct Target {
     rect: RECT,
 }
 enum Command {
-    ProbeRight(POINT, SyncSender<Option<(Target, bool)>>),
-    ProbeMiddle(POINT, SyncSender<Option<(Target, bool)>>),
+    ProbeRight(POINT, SyncSender<Option<(Target, u32)>>),
+    ProbeMiddle(POINT, SyncSender<Option<(Target, u32)>>),
     ProbeRolled(POINT, SyncSender<Option<Target>>),
     FocusRolled(isize, Instant),
     Toggle(Target),
     ToggleTopmost(Target),
     ToggleTransparency(Target),
     SendToBack(Target),
+    MinimizeToTray(Target),
 }
 struct Drag {
     target: Target,
@@ -103,12 +111,14 @@ struct Saved {
     fork: bool,
 }
 struct Manager {
+    hidden: HashMap<u32, tray_windows::Hidden>,
+    hidden_property: Vec<u16>,
+    tray_owner: isize,
     windows: HashMap<isize, Saved>,
     topmost: HashMap<isize, (Target, usize, bool)>,
     topmost_property: Vec<u16>,
     transparent: HashMap<isize, Transparent>,
     transparency_property: Vec<u16>,
-    transparency_recovery: bool,
     roll_recovery: bool,
     exit_pending: bool,
     property: Vec<u16>,
@@ -260,10 +270,14 @@ impl Manager {
             return Err("Run WinRoll RS without administrator privileges".into());
         }
         Ok(Self {
+            hidden: HashMap::new(),
+            hidden_property: format!("WinRoll-RS.Hidden.{pid}\0")
+                .encode_utf16()
+                .collect(),
+            tray_owner: 0,
             windows: HashMap::new(),
             topmost: HashMap::new(),
             transparent: HashMap::new(),
-            transparency_recovery: false,
             roll_recovery: false,
             transparency_property: format!("WinRoll-RS.Transparency.{pid}\0")
                 .encode_utf16()
@@ -983,7 +997,13 @@ impl Manager {
             .chain(
                 self.transparent
                     .values()
-                    .filter(|_| self.exit_pending || self.transparency_recovery)
+                    .filter(|_| self.exit_pending)
+                    .map(|saved| saved.target),
+            )
+            .chain(
+                self.hidden
+                    .values()
+                    .filter(|_| self.exit_pending)
                     .map(|saved| saved.target),
             )
         {
@@ -1008,6 +1028,13 @@ impl Manager {
 
     // Returns true only when Exit has verified every surviving managed window.
     fn control(&mut self, action: u32) -> bool {
+        if action == TOGGLE_ENABLED {
+            return self.control(if STOPPING.load(Ordering::Relaxed) {
+                ENABLE
+            } else {
+                PAUSE
+            });
+        }
         if action == ENABLE {
             if !self.exit_pending
                 && (self.windows.is_empty() || !RECOVERY_PENDING.load(Ordering::Relaxed))
@@ -1020,28 +1047,20 @@ impl Manager {
             STOPPING.store(true, Ordering::Relaxed);
             return false;
         }
-        if action == RESTORE_TRANSPARENCY {
-            self.restore_all_transparency();
-            self.transparency_recovery = !self.transparent.is_empty();
-            if !self.exit_pending {
-                self.publish_recovery();
-                return false;
-            }
-        }
         if action == EXIT {
             STOPPING.store(true, Ordering::Relaxed);
             self.exit_pending = true;
         }
+        if self.exit_pending {
+            self.restore_all_hidden();
+        }
         let mut restored = self.restore_all();
         self.roll_recovery = !restored;
-        if self.transparency_recovery {
-            self.restore_all_transparency();
-            self.transparency_recovery = !self.transparent.is_empty();
-        }
         if self.exit_pending {
             self.restore_topmost();
             self.restore_all_transparency();
-            restored &= self.topmost.is_empty() && self.transparent.is_empty();
+            restored &=
+                self.topmost.is_empty() && self.transparent.is_empty() && self.hidden.is_empty();
         }
         self.publish_recovery();
         log(format!("CONTROL action={action} restored={restored}"));
@@ -1138,14 +1157,16 @@ unsafe extern "system" fn mouse_hook(code: i32, message: WPARAM, data: LPARAM) -
                         Command::ProbeRight(event.pt, reply)
                     };
                     if sender.try_send(probe).is_ok()
-                        && let Ok(Some((target, close))) =
+                        && let Ok(Some((target, hit))) =
                             receive.recv_timeout(Duration::from_millis(40))
                         && sender
-                            .try_send(if middle && !close {
+                            .try_send(if middle && hit == HTMINBUTTON {
+                                Command::MinimizeToTray(target)
+                            } else if middle && hit == HTCAPTION {
                                 Command::ToggleTransparency(target)
                             } else if middle {
                                 Command::ToggleTopmost(target)
-                            } else if close {
+                            } else if hit == HTCLOSE {
                                 Command::SendToBack(target)
                             } else {
                                 Command::Toggle(target)
@@ -1428,7 +1449,7 @@ unsafe extern "system" fn options_proc(hwnd: HWND, message: u32, w: WPARAM, l: L
                     (
                         6,
                         w!("STATIC"),
-                        w!("Invisible windows: use Restore transparency in the tray."),
+                        w!("Invisible windows: choose Exit in the tray to restore."),
                         0,
                         130,
                         40,
@@ -1636,20 +1657,33 @@ unsafe extern "system" fn tray_proc(hwnd: HWND, message: u32, w: WPARAM, l: LPAR
     unsafe {
         if TASKBAR_CREATED.get().is_some_and(|id| message == *id) {
             tray_icon(hwnd, NIM_ADD);
+            request_control(RECREATE_TRAY);
             return 0;
         }
         match message {
+            WINDOW_TRAY_CALLBACK => {
+                // These icons use the original callback format: w is the full icon ID.
+                if matches!(
+                    l as u32,
+                    WM_LBUTTONUP | WM_RBUTTONUP | NIN_SELECT | NIN_KEYSELECT
+                ) {
+                    RESTORE_TRAY_REQUESTS.lock().unwrap().push(w as u32);
+                }
+                return 0;
+            }
             WORKER_DONE => {
                 // TrackPopupMenu has its own message loop. Completion must also close that loop.
                 EndMenu();
                 return 0;
             }
-            TRAY_CALLBACK
-                if matches!(
-                    l as u32 & 0xffff,
-                    WM_CONTEXTMENU | NIN_SELECT | NIN_KEYSELECT
-                ) =>
-            {
+            TRAY_CALLBACK if matches!(l as u32 & 0xffff, NIN_SELECT | NIN_KEYSELECT) => {
+                if !RECOVERY_PENDING.load(Ordering::Relaxed) {
+                    // Preserve click parity even when two clicks arrive before the worker wakes.
+                    CONTROL_REQUESTS.fetch_xor(TOGGLE_ENABLED, Ordering::Relaxed);
+                }
+                return 0;
+            }
+            TRAY_CALLBACK if l as u32 & 0xffff == WM_CONTEXTMENU => {
                 let menu = CreatePopupMenu();
                 if menu.is_null() {
                     return 0;
@@ -1689,12 +1723,6 @@ unsafe extern "system" fn tray_proc(hwnd: HWND, message: u32, w: WPARAM, l: LPAR
                         w!("&Unroll all")
                     },
                 );
-                AppendMenuW(
-                    menu,
-                    MF_STRING,
-                    RESTORE_TRANSPARENCY as usize,
-                    w!("Restore &transparency"),
-                );
                 AppendMenuW(menu, MF_SEPARATOR, 0, std::ptr::null());
                 AppendMenuW(menu, MF_STRING, SETTINGS as usize, w!("&Options..."));
                 AppendMenuW(menu, MF_STRING, ABOUT as usize, w!("&About..."));
@@ -1721,10 +1749,7 @@ unsafe extern "system" fn tray_proc(hwnd: HWND, message: u32, w: WPARAM, l: LPAR
                 if action == SETTINGS {
                     show_auxiliary(hwnd, true);
                 }
-                if matches!(
-                    action,
-                    ENABLE | PAUSE | UNROLL_ALL | EXIT | RESTORE_TRANSPARENCY
-                ) {
+                if matches!(action, ENABLE | PAUSE | UNROLL_ALL | EXIT) {
                     request_control(action);
                 }
                 return 0;
@@ -1844,13 +1869,17 @@ pub fn run() -> Result<(), String> {
         return Err("Cannot install mouse hook".into());
     }
     let tray_key = tray as isize;
+    manager.tray_owner = tray_key;
     let worker = thread::spawn(move || {
         crate::accessibility::initialize();
         loop {
             let requests = CONTROL_REQUESTS.swap(0, Ordering::Relaxed);
-            if requests != 0 {
+            if requests & RECREATE_TRAY != 0 {
+                manager.recreate_hidden_icons();
+            }
+            if requests & !RECREATE_TRAY != 0 {
                 // A stop request wins over Enable if multiple actions arrive while restoring.
-                let action = [EXIT, PAUSE, UNROLL_ALL, RESTORE_TRANSPARENCY, ENABLE]
+                let action = [EXIT, PAUSE, UNROLL_ALL, ENABLE, TOGGLE_ENABLED]
                     .into_iter()
                     .find(|action| requests & action != 0)
                     .unwrap();
@@ -1861,6 +1890,12 @@ pub fn run() -> Result<(), String> {
                     PostMessageW(tray_key as HWND, TRAY_UPDATE, 0, 0);
                 }
             }
+            let restore = std::mem::take(&mut *RESTORE_TRAY_REQUESTS.lock().unwrap());
+            let restored_hidden = !restore.is_empty();
+            for id in restore {
+                manager.restore_hidden(id, true);
+            }
+            let hidden_changed = manager.clean_hidden() || restored_hidden;
             // Closing a rolled window needs no further user action to release its state.
             let closed: Vec<_> = manager
                 .windows
@@ -1868,7 +1903,7 @@ pub fn run() -> Result<(), String> {
                 .filter(|(_, saved)| !manager.owns(saved))
                 .map(|(key, _)| *key)
                 .collect();
-            let mut changed = !closed.is_empty();
+            let mut changed = hidden_changed || !closed.is_empty();
             for key in closed {
                 manager.windows.remove(&key);
             }
@@ -1913,6 +1948,7 @@ pub fn run() -> Result<(), String> {
                 && manager.windows.is_empty()
                 && manager.topmost.is_empty()
                 && manager.transparent.is_empty()
+                && manager.hidden.is_empty()
             {
                 break;
             }
@@ -1927,9 +1963,7 @@ pub fn run() -> Result<(), String> {
                     let target = if STOPPING.load(Ordering::Relaxed) {
                         None
                     } else {
-                        manager
-                            .probe_hits(point, &[HTCAPTION, HTCLOSE])
-                            .map(|(target, hit)| (target, hit == HTCLOSE))
+                        manager.probe_hits(point, &[HTCAPTION, HTCLOSE])
                     };
                     let _ = reply.try_send(target);
                     log(format!(
@@ -1945,14 +1979,15 @@ pub fn run() -> Result<(), String> {
                     let target = if STOPPING.load(Ordering::Relaxed) {
                         None
                     } else {
-                        manager
-                            .probe_hits(point, &[HTCAPTION, HTCLOSE])
-                            .map(|(target, hit)| (target, hit == HTCLOSE))
+                        manager.probe_hits(point, &[HTCAPTION, HTCLOSE, HTMINBUTTON])
                     };
                     let _ = reply.try_send(target);
                 }
                 Ok(Command::ToggleTopmost(target)) if !STOPPING.load(Ordering::Relaxed) => {
                     manager.toggle_topmost(target)
+                }
+                Ok(Command::MinimizeToTray(target)) if !STOPPING.load(Ordering::Relaxed) => {
+                    manager.minimize_to_tray(target)
                 }
                 Ok(Command::ToggleTransparency(target)) if !STOPPING.load(Ordering::Relaxed) => {
                     manager.toggle_transparency(target)
@@ -2610,6 +2645,7 @@ fn self_test(interactive: bool) -> Result<(), String> {
         .join()
         .map_err(|_| "Second fixture thread panicked")?;
     result?;
+    tray_windows::self_test()?;
     self_test_options()?;
     self_test_menu_exit()
 }
@@ -2659,11 +2695,6 @@ fn self_test_transparency(point: POINT) -> Result<(), String> {
         if manager.transparent.is_empty() {
             return Err("Pause discarded transparency".into());
         }
-        manager.control(RESTORE_TRANSPARENCY);
-        if !manager.transparent.is_empty() || RECOVERY_PENDING.load(Ordering::Relaxed) {
-            return Err("Tray action did not restore transparency".into());
-        }
-        manager.toggle_transparency(target);
         if !manager.control(EXIT) {
             return Err("Exit did not restore transparency".into());
         }
@@ -2689,9 +2720,7 @@ fn self_test_transparency(point: POINT) -> Result<(), String> {
     TRANSPARENCY.store(original_percent, Ordering::Relaxed);
     STOPPING.store(false, Ordering::Relaxed);
     result?;
-    log(
-        "PASS transparency 0–100%, toggle, Pause, tray restoration and original layered attributes on Exit",
-    );
+    log("PASS transparency 0–100%, toggle, Pause and original layered attributes on Exit");
     Ok(())
 }
 
@@ -2930,6 +2959,44 @@ fn self_test_options() -> Result<(), String> {
 }
 
 fn self_test_menu_exit() -> Result<(), String> {
+    let mut manager = Manager::new()?;
+    STOPPING.store(false, Ordering::Relaxed);
+    CONTROL_REQUESTS.store(0, Ordering::Relaxed);
+    for (event, paused) in [
+        (NIN_SELECT, true),
+        (NIN_SELECT, false),
+        (NIN_KEYSELECT, true),
+        (NIN_KEYSELECT, false),
+    ] {
+        unsafe {
+            tray_proc(null_mut(), TRAY_CALLBACK, 0, ((1 << 16) | event) as isize);
+        }
+        let action = CONTROL_REQUESTS.swap(0, Ordering::Relaxed);
+        if action != TOGGLE_ENABLED {
+            return Err("Tray activation did not request a toggle".into());
+        }
+        manager.control(action);
+        if STOPPING.load(Ordering::Relaxed) != paused {
+            return Err("Tray activation did not toggle enabled state".into());
+        }
+    }
+    for _ in 0..2 {
+        unsafe {
+            tray_proc(null_mut(), TRAY_CALLBACK, 0, NIN_SELECT as isize);
+        }
+    }
+    if CONTROL_REQUESTS.swap(0, Ordering::Relaxed) != 0 {
+        return Err("Two queued tray clicks did not cancel".into());
+    }
+    RECOVERY_PENDING.store(true, Ordering::Relaxed);
+    unsafe {
+        tray_proc(null_mut(), TRAY_CALLBACK, 0, NIN_SELECT as isize);
+    }
+    RECOVERY_PENDING.store(false, Ordering::Relaxed);
+    if CONTROL_REQUESTS.swap(0, Ordering::Relaxed) != 0 {
+        return Err("Tray click bypassed pending recovery".into());
+    }
+    log("PASS tray left-click and keyboard toggle, rapid-click parity and recovery guard");
     // Exercise the real native modal menu and outer message loop, with no target windows at risk.
     unsafe {
         let class = WNDCLASSW {
@@ -3179,6 +3246,19 @@ unsafe extern "system" fn fixture_proc(hwnd: HWND, message: u32, w: WPARAM, l: L
                 },
             );
             return 0;
+        }
+        if message == WM_WINDOWPOSCHANGING {
+            let position = &mut *(l as *mut WINDOWPOS);
+            if position.flags & SWP_HIDEWINDOW != 0
+                && FIXTURE_DELAYS_HIDE
+                    .compare_exchange(hwnd as isize, 0, Ordering::Relaxed, Ordering::Relaxed)
+                    .is_ok()
+            {
+                thread::sleep(Duration::from_millis(600));
+            }
+            if FIXTURE_REFUSES_SHOW.load(Ordering::Relaxed) == hwnd as isize {
+                position.flags &= !SWP_SHOWWINDOW;
+            }
         }
         if message == WM_WINDOWPOSCHANGED
             && FIXTURE_REFUSES_EXPANSION.load(Ordering::Relaxed) == hwnd as isize
