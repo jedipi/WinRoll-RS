@@ -99,6 +99,8 @@ struct Saved {
 }
 struct Manager {
     windows: HashMap<isize, Saved>,
+    topmost: HashMap<isize, (Target, usize, bool)>,
+    topmost_property: Vec<u16>,
     exit_pending: bool,
     property: Vec<u16>,
     next_marker: usize,
@@ -236,6 +238,10 @@ impl Manager {
         }
         Ok(Self {
             windows: HashMap::new(),
+            topmost: HashMap::new(),
+            topmost_property: format!("WinRoll-RS.Topmost.{pid}\0")
+                .encode_utf16()
+                .collect(),
             exit_pending: false,
             property: format!("WinRoll-RS.Experiment.{pid}\0")
                 .encode_utf16()
@@ -347,7 +353,72 @@ impl Manager {
             }
     }
 
-    fn toggle_topmost(&self, target: Target) {
+    fn owns_topmost(&self, target: Target, marker: usize) -> bool {
+        same_target(target)
+            && unsafe {
+                GetPropW(target.hwnd as HWND, self.topmost_property.as_ptr()) as usize == marker
+            }
+    }
+
+    fn restore_topmost(&mut self) {
+        for (key, (target, marker, original)) in self.topmost.clone() {
+            if !self.owns_topmost(target, marker) {
+                self.topmost.remove(&key);
+                continue;
+            }
+            let hwnd = key as HWND;
+            unsafe {
+                if SetWindowPos(
+                    hwnd,
+                    if original {
+                        HWND_TOPMOST
+                    } else {
+                        HWND_NOTOPMOST
+                    },
+                    0,
+                    0,
+                    0,
+                    0,
+                    SWP_NOMOVE
+                        | SWP_NOSIZE
+                        | SWP_NOACTIVATE
+                        | SWP_NOOWNERZORDER
+                        | SWP_ASYNCWINDOWPOS,
+                ) == 0
+                {
+                    continue;
+                }
+            }
+            let deadline = Instant::now() + Duration::from_millis(350);
+            let mut stable = 0;
+            loop {
+                if !self.owns_topmost(target, marker) {
+                    self.topmost.remove(&key);
+                    break;
+                }
+                if (unsafe { GetWindowLongW(hwnd, GWL_EXSTYLE) } as u32 & WS_EX_TOPMOST != 0)
+                    == original
+                {
+                    stable += 1;
+                    if stable == 5 {
+                        unsafe {
+                            RemovePropW(hwnd, self.topmost_property.as_ptr());
+                        }
+                        self.topmost.remove(&key);
+                        break;
+                    }
+                } else {
+                    stable = 0;
+                }
+                if Instant::now() >= deadline {
+                    break;
+                }
+                thread::sleep(Duration::from_millis(20));
+            }
+        }
+    }
+
+    fn toggle_topmost(&mut self, target: Target) {
         let hwnd = target.hwnd as HWND;
         if !same_target(target)
             || !visible_caption(hwnd)
@@ -360,6 +431,19 @@ impl Manager {
         // Use the current native state, including topmost set by the target or another utility.
         unsafe {
             let topmost = GetWindowLongW(hwnd, GWL_EXSTYLE) as u32 & WS_EX_TOPMOST != 0;
+            if !self
+                .topmost
+                .get(&target.hwnd)
+                .is_some_and(|(saved, marker, _)| self.owns_topmost(*saved, *marker))
+            {
+                let marker = self.next_marker;
+                self.next_marker += 1;
+                if SetPropW(hwnd, self.topmost_property.as_ptr(), marker as HANDLE) == 0 {
+                    log("REJECT: could not mark topmost window identity");
+                    return;
+                }
+                self.topmost.insert(target.hwnd, (target, marker, topmost));
+            }
             if SetWindowPos(
                 hwnd,
                 if topmost {
@@ -710,10 +794,14 @@ impl Manager {
 
     fn publish_recovery(&self) {
         let mut affected = Vec::new();
-        for saved in self.windows.values() {
+        for target in self.windows.values().map(|saved| saved.target).chain(
+            self.topmost
+                .values()
+                .filter(|_| self.exit_pending)
+                .map(|(target, _, _)| *target),
+        ) {
             let mut title = [0u16; 128];
-            let length =
-                unsafe { GetWindowTextW(saved.target.hwnd as HWND, title.as_mut_ptr(), 128) };
+            let length = unsafe { GetWindowTextW(target.hwnd as HWND, title.as_mut_ptr(), 128) };
             let name = if length > 0 {
                 String::from_utf16_lossy(&title[..length as usize])
             } else {
@@ -721,10 +809,11 @@ impl Manager {
             };
             affected.push(format!(
                 "{name} (PID {}, HWND {:#x})",
-                saved.target.pid, saved.target.hwnd
+                target.pid, target.hwnd
             ));
         }
         affected.sort();
+        affected.dedup();
         let pending = !affected.is_empty();
         *RECOVERY_WINDOWS.lock().unwrap() = affected;
         RECOVERY_PENDING.store(pending, Ordering::Relaxed);
@@ -733,7 +822,9 @@ impl Manager {
     // Returns true only when Exit has verified every surviving managed window.
     fn control(&mut self, action: u32) -> bool {
         if action == ENABLE {
-            if self.windows.is_empty() || !RECOVERY_PENDING.load(Ordering::Relaxed) {
+            if !self.exit_pending
+                && (self.windows.is_empty() || !RECOVERY_PENDING.load(Ordering::Relaxed))
+            {
                 STOPPING.store(false, Ordering::Relaxed);
             }
             return false;
@@ -746,7 +837,11 @@ impl Manager {
             STOPPING.store(true, Ordering::Relaxed);
             self.exit_pending = true;
         }
-        let restored = self.restore_all();
+        let mut restored = self.restore_all();
+        if self.exit_pending {
+            self.restore_topmost();
+            restored &= self.topmost.is_empty();
+        }
         self.publish_recovery();
         log(format!("CONTROL action={action} restored={restored}"));
         self.exit_pending && restored
@@ -1444,9 +1539,19 @@ pub fn run() -> Result<(), String> {
                 .filter(|(_, saved)| !manager.owns(saved))
                 .map(|(key, _)| *key)
                 .collect();
-            let changed = !closed.is_empty();
+            let mut changed = !closed.is_empty();
             for key in closed {
                 manager.windows.remove(&key);
+            }
+            let closed: Vec<_> = manager
+                .topmost
+                .iter()
+                .filter(|(_, (target, marker, _))| !manager.owns_topmost(*target, *marker))
+                .map(|(key, _)| *key)
+                .collect();
+            changed |= !closed.is_empty();
+            for key in closed {
+                manager.topmost.remove(&key);
             }
             if changed && RECOVERY_PENDING.load(Ordering::Relaxed) {
                 manager.publish_recovery();
@@ -1465,7 +1570,7 @@ pub fn run() -> Result<(), String> {
             if HAS_ROLLED_WINDOWS.swap(rolled, Ordering::Relaxed) != rolled {
                 unsafe { PostMessageW(tray_key as HWND, TRAY_UPDATE, 0, 0) };
             }
-            if manager.exit_pending && manager.windows.is_empty() {
+            if manager.exit_pending && manager.windows.is_empty() && manager.topmost.is_empty() {
                 break;
             }
             let wait = if DRAG_ACTIVE.load(Ordering::Relaxed) {
@@ -1740,8 +1845,9 @@ fn self_test(interactive: bool) -> Result<(), String> {
         {
             return Err("Close and caption gestures did not reject other hit regions".into());
         }
-        self_test_topmost(&manager, close_point, false)?;
-        self_test_topmost(&manager, close_point, true)?;
+        self_test_topmost_exit(close_point)?;
+        self_test_topmost(&mut manager, close_point, false)?;
+        self_test_topmost(&mut manager, close_point, true)?;
         self_test_send_to_back(&manager, close_point, second_hwnd, false)?;
         self_test_send_to_back(&manager, close_point, second_hwnd, true)?;
         let mut stale = manager
@@ -1799,8 +1905,8 @@ fn self_test(interactive: bool) -> Result<(), String> {
             log(format!("PASS native cycle {cycle}/20"));
         }
         manager.toggle(manager.probe(point).ok_or("Fixture caption unavailable")?);
-        self_test_topmost(&manager, close_point, false)?;
-        self_test_topmost(&manager, close_point, true)?;
+        self_test_topmost(&mut manager, close_point, false)?;
+        self_test_topmost(&mut manager, close_point, true)?;
         self_test_send_to_back(&manager, close_point, second_hwnd, true)?;
         manager.windows.get_mut(&key).unwrap().fork = true;
         manager.maintain_rolled_size();
@@ -2089,8 +2195,8 @@ fn self_test(interactive: bool) -> Result<(), String> {
             x: maximized.right - 25,
             y: maximized.top + caption_height(unsafe { GetDpiForWindow(hwnd) }) / 2,
         };
-        self_test_topmost(&manager, maximized_close, false)?;
-        self_test_topmost(&manager, maximized_close, true)?;
+        self_test_topmost(&mut manager, maximized_close, false)?;
+        self_test_topmost(&mut manager, maximized_close, true)?;
         self_test_send_to_back(&manager, maximized_close, second_hwnd, true)?;
         unsafe {
             PostMessageW(hwnd, WM_SYSCOMMAND, SC_RESTORE as usize, 0);
@@ -2161,7 +2267,51 @@ fn self_test(interactive: bool) -> Result<(), String> {
     self_test_menu_exit()
 }
 
-fn self_test_topmost(manager: &Manager, point: POINT, expected: bool) -> Result<(), String> {
+fn self_test_topmost_exit(point: POINT) -> Result<(), String> {
+    let mut manager = Manager::new()?;
+    let target = manager
+        .probe_hit(point, HTCLOSE)
+        .ok_or("Fixture Close unavailable")?;
+    let hwnd = target.hwnd as HWND;
+    for original in [false, true] {
+        unsafe {
+            SetWindowPos(
+                hwnd,
+                if original {
+                    HWND_TOPMOST
+                } else {
+                    HWND_NOTOPMOST
+                },
+                0,
+                0,
+                0,
+                0,
+                SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE,
+            );
+        }
+        self_test_topmost(&mut manager, point, !original)?;
+        manager.control(PAUSE);
+        manager.control(UNROLL_ALL);
+        if (unsafe { GetWindowLongW(hwnd, GWL_EXSTYLE) } as u32 & WS_EX_TOPMOST != 0) == original {
+            return Err("Pause or Unroll all changed Always on Top".into());
+        }
+        manager.control(ENABLE);
+        self_test_topmost(&mut manager, point, original)?;
+        self_test_topmost(&mut manager, point, !original)?;
+        if !manager.control(EXIT) {
+            return Err("Exit did not complete topmost restoration".into());
+        }
+        if (unsafe { GetWindowLongW(hwnd, GWL_EXSTYLE) } as u32 & WS_EX_TOPMOST != 0) != original {
+            return Err("Exit left the window's Always on Top state changed".into());
+        }
+        manager.exit_pending = false;
+        manager.control(ENABLE);
+    }
+    log("PASS Exit restores original Always on Top state");
+    Ok(())
+}
+
+fn self_test_topmost(manager: &mut Manager, point: POINT, expected: bool) -> Result<(), String> {
     let target = manager
         .probe_hit(point, HTCLOSE)
         .ok_or("Fixture Close button was not eligible")?;

@@ -70,7 +70,9 @@ WinRoll saves the window's original size and position so it can restore them exa
 ### Always on Top
 
 Middle-click a window's **Close (X)** button to toggle Always on Top. Middle-click
-it again to turn it off. 
+it again to turn it off. Exiting WinRoll RS through its tray restores the original
+Always on Top state of windows changed with this gesture. Pause and Unroll all
+leave Always on Top unchanged.
 
 ### Send to Back
 
