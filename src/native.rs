@@ -108,7 +108,6 @@ struct Saved {
     target: Target,
     marker: usize,
     dpi: u32,
-    fork: bool,
 }
 struct Manager {
     hidden: HashMap<u32, tray_windows::Hidden>,
@@ -165,32 +164,8 @@ fn caption_height(dpi: u32) -> i32 {
     }
 }
 
-fn rolled_height(dpi: u32, fork: bool) -> i32 {
-    let height = caption_height(dpi) + (dpi as i32 + 48) / 96;
-    if fork {
-        // Fork's tab row begins about 12 pixels above this height at 96 DPI.
-        height - (12 * dpi as i32 + 48) / 96
-    } else {
-        height
-    }
-}
-
-fn is_fork(pid: u32) -> bool {
-    unsafe {
-        let process = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, 0, pid);
-        if process.is_null() {
-            return false;
-        }
-        let mut path = [0u16; 1024];
-        let mut length = path.len() as u32;
-        let named = QueryFullProcessImageNameW(process, 0, path.as_mut_ptr(), &mut length) != 0;
-        CloseHandle(process);
-        named
-            && String::from_utf16_lossy(&path[..length as usize])
-                .rsplit('\\')
-                .next()
-                .is_some_and(|name| name.eq_ignore_ascii_case("Fork.exe"))
-    }
+fn rolled_height(dpi: u32) -> i32 {
+    caption_height(dpi) + (dpi as i32 + 48) / 96
 }
 
 fn integrity(pid: u32) -> Option<u32> {
@@ -392,13 +367,6 @@ impl Manager {
                 .iter()
                 .copied()
                 .find(|expected| hit == *expected as usize);
-            let recognized = recognized.or_else(|| {
-                (expected_hits.contains(&HTCLOSE)
-                    && hit == HTCLIENT as usize
-                    && is_fork(pid)
-                    && crate::accessibility::fork_close(point.x, point.y, pid))
-                .then_some(HTCLOSE)
-            });
             let Some(recognized) = recognized else {
                 log(format!(
                     "PASS THROUGH: hit-test={hit} expected={expected_hits:?}"
@@ -697,8 +665,7 @@ impl Manager {
         if dpi == 0 {
             return;
         }
-        let fork = is_fork(target.pid);
-        let height = rolled_height(dpi, fork);
+        let height = rolled_height(dpi);
         let (width, old_height) = dimensions(target.rect);
         if height <= 0 || height >= old_height {
             return;
@@ -715,7 +682,6 @@ impl Manager {
                 target,
                 marker,
                 dpi,
-                fork,
             },
         );
         if self.resize(
@@ -795,7 +761,7 @@ impl Manager {
             let Some(current) = rect(key as HWND) else {
                 continue;
             };
-            let height = rolled_height(dpi, saved.fork);
+            let height = rolled_height(dpi);
             // Keep the saved physical width: DPI-driven width changes shift the
             // monitor boundary while a rolled window is being dragged.
             let width = dimensions(saved.target.rect).0;
@@ -847,7 +813,7 @@ impl Manager {
         let hwnd = position.key as HWND;
         let width = dimensions(saved.target.rect).0;
         let dpi = unsafe { GetDpiForWindow(hwnd) };
-        let height = rolled_height(dpi, saved.fork);
+        let height = rolled_height(dpi);
         if dpi == 0 || height <= 0 {
             return;
         }
@@ -954,7 +920,7 @@ impl Manager {
             current.left,
             current.top,
             width,
-            rolled_height(current_dpi, saved.fork),
+            rolled_height(current_dpi),
             [work.left, work.top, work.right, work.bottom],
         );
         log(format!(
@@ -1871,7 +1837,6 @@ pub fn run() -> Result<(), String> {
     let tray_key = tray as isize;
     manager.tray_owner = tray_key;
     let worker = thread::spawn(move || {
-        crate::accessibility::initialize();
         loop {
             let requests = CONTROL_REQUESTS.swap(0, Ordering::Relaxed);
             if requests & RECREATE_TRAY != 0 {
@@ -2290,18 +2255,9 @@ fn self_test(interactive: bool) -> Result<(), String> {
         self_test_topmost(&mut manager, close_point, false)?;
         self_test_topmost(&mut manager, close_point, true)?;
         self_test_send_to_back(&manager, close_point, second_hwnd, true)?;
-        manager.windows.get_mut(&key).unwrap().fork = true;
-        manager.maintain_rolled_size();
-        if rect(hwnd).map(dimensions) != Some((800, rolled_height(dpi, true)))
-            || !manager.restore_all()
-            || rect(hwnd).map(bounds) != Some(bounds(initial))
-        {
-            return Err("Fork-sized caption did not stay rolled or restore".into());
+        if !manager.restore_all() || rect(hwnd).map(bounds) != Some(bounds(initial)) {
+            return Err("Rolled caption gesture checks did not restore geometry".into());
         }
-        log(format!(
-            "PASS Fork-sized caption height={}",
-            rolled_height(dpi, true)
-        ));
         self_test_dpi_move(&mut manager, key, point)?;
         let mut monitor_info = MONITORINFO {
             cbSize: size_of::<MONITORINFO>() as u32,
@@ -2328,7 +2284,7 @@ fn self_test(interactive: bool) -> Result<(), String> {
             y: moved_y,
             finished: true,
         });
-        if dimensions(rect(hwnd).ok_or("Fixture closed")?) != (800, rolled_height(dpi, false))
+        if dimensions(rect(hwnd).ok_or("Fixture closed")?) != (800, rolled_height(dpi))
             || !manager.restore_all()
             || rect(hwnd).map(bounds) != Some([moved_x, moved_y, moved_x + 800, moved_y + 600])
         {
@@ -2345,7 +2301,7 @@ fn self_test(interactive: bool) -> Result<(), String> {
                 .ok_or("Moved fixture caption unavailable")?,
         );
         let current_dpi = unsafe { GetDpiForWindow(hwnd) };
-        let expected_height = rolled_height(current_dpi, false);
+        let expected_height = rolled_height(current_dpi);
         manager.windows.get_mut(&key).unwrap().dpi = current_dpi + 1;
         if !manager.resize(key, moved_x, moved_y, 800, expected_height + 10) {
             return Err("Could not simulate stale rolled caption height".into());
@@ -3147,9 +3103,9 @@ fn self_test_dpi_move(manager: &mut Manager, key: isize, point: POINT) -> Result
         log(format!(
             "DPI MOVE dpi={dpi} rect={:?} expected_height={}",
             bounds(current),
-            rolled_height(dpi, false)
+            rolled_height(dpi)
         ));
-        if dimensions(current) != (dimensions(initial).0, rolled_height(dpi, false)) {
+        if dimensions(current) != (dimensions(initial).0, rolled_height(dpi)) {
             return Err(
                 "Unfinished mixed-DPI drag changed saved width or exposed fixture client area"
                     .into(),
@@ -3190,7 +3146,7 @@ fn self_test_dpi_move(manager: &mut Manager, key: isize, point: POINT) -> Result
                 ));
             }
             if rect(hwnd).map(dimensions)
-                != Some((dimensions(initial).0, rolled_height(previous_dpi, false)))
+                != Some((dimensions(initial).0, rolled_height(previous_dpi)))
             {
                 return Err(
                     "Held boundary position did not settle at saved width and caption height"

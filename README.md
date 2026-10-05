@@ -100,8 +100,8 @@ Unroll all leaves them hidden. Exit shows them before quitting, preserving their
 normal or maximized state; restoring an individual rolled window keeps it rolled.
 If a window cannot be shown, WinRoll keeps its icon and lets you retry.
 
-The button must report the native Minimize hit region; custom controls that do not
-report it and windows running at a different integrity level retain their normal clicks.
+The button must report the native Minimize hit region. Unrecognized custom controls
+and windows running at a different integrity level retain their normal clicks.
 Exit WinRoll through its tray before ending its process: hidden-window state is held
 in memory and cannot be recovered by restarting WinRoll after a forced termination.
 
