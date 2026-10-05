@@ -41,7 +41,6 @@ static RECOVERY_WINDOWS: Mutex<Vec<String>> = Mutex::new(Vec::new());
 static WORKER_FINISHED: AtomicBool = AtomicBool::new(false);
 static TASKBAR_CREATED: OnceLock<u32> = OnceLock::new();
 static TRAY_ICONS: OnceLock<Option<(isize, isize)>> = OnceLock::new();
-static HAS_ROLLED_WINDOWS: AtomicBool = AtomicBool::new(false);
 static ABOUT_WINDOW: AtomicIsize = AtomicIsize::new(0);
 static OPTIONS_WINDOW: AtomicIsize = AtomicIsize::new(0);
 static TRANSPARENCY: AtomicU32 = AtomicU32::new(50);
@@ -1176,22 +1175,19 @@ fn tray_icon(hwnd: HWND, operation: u32) -> bool {
     else {
         return false;
     };
+    let paused = STOPPING.load(Ordering::Relaxed);
     let mut icon = NOTIFYICONDATAW {
         cbSize: size_of::<NOTIFYICONDATAW>() as u32,
         hWnd: hwnd,
         uID: 1,
         uFlags: NIF_MESSAGE | NIF_ICON | NIF_TIP | NIF_SHOWTIP,
         uCallbackMessage: TRAY_CALLBACK,
-        hIcon: if HAS_ROLLED_WINDOWS.load(Ordering::Relaxed) {
-            rolled as HICON
-        } else {
-            expanded as HICON
-        },
+        hIcon: if paused { expanded } else { rolled } as HICON,
         ..Default::default()
     };
     let tip = if RECOVERY_PENDING.load(Ordering::Relaxed) {
         "WinRoll RS - unroll pending; retry Unroll all or Exit"
-    } else if STOPPING.load(Ordering::Relaxed) {
+    } else if paused {
         "WinRoll RS - paused"
     } else {
         "WinRoll RS - enabled"
@@ -1657,6 +1653,8 @@ unsafe extern "system" fn tray_proc(hwnd: HWND, message: u32, w: WPARAM, l: LPAR
                 let paused = STOPPING.load(Ordering::Relaxed);
                 let flags = if paused && RECOVERY_PENDING.load(Ordering::Relaxed) {
                     MF_STRING | MF_GRAYED
+                } else if !paused {
+                    MF_STRING | MF_CHECKED
                 } else {
                     MF_STRING
                 };
@@ -1664,7 +1662,7 @@ unsafe extern "system" fn tray_proc(hwnd: HWND, message: u32, w: WPARAM, l: LPAR
                     menu,
                     flags,
                     if paused { ENABLE } else { PAUSE } as usize,
-                    if paused { w!("&Enable") } else { w!("&Pause") },
+                    w!("&Enable"),
                 );
                 let affected = RECOVERY_WINDOWS.lock().unwrap();
                 if !affected.is_empty() {
@@ -1905,10 +1903,6 @@ pub fn run() -> Result<(), String> {
                 manager.move_rolled(position);
             }
             manager.maintain_rolled_size();
-            let rolled = !manager.windows.is_empty();
-            if HAS_ROLLED_WINDOWS.swap(rolled, Ordering::Relaxed) != rolled {
-                unsafe { PostMessageW(tray_key as HWND, TRAY_UPDATE, 0, 0) };
-            }
             if manager.exit_pending
                 && manager.windows.is_empty()
                 && manager.topmost.is_empty()
