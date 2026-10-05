@@ -79,19 +79,27 @@ leave Always on Top unchanged.
 Right-click a window's **Close (X)** button to send it behind other windows without
 minimizing it or changing its size or position. 
 
+### Transparency
+
+Middle-click an empty title-bar area to toggle the configured transparency. Middle-click
+again to restore the window's original appearance. Pause keeps the current appearance
+and disables the gesture; Unroll all leaves transparency unchanged.
+
+At 100% the window is invisible and cannot be clicked. Use **Restore transparency**
+in the WinRoll RS tray menu to restore all affected windows, or **Exit** to restore
+them before quitting. Applications that use per-pixel layered rendering are excluded.
+
 ## Options
 
 Open **Options...** from the WinRoll RS tray menu to open **Options**. Select
 **Automatically start with Windows** to launch WinRoll RS when you sign in, or
 clear it to disable startup.
 
+The **Transparency** slider has 10% steps from **0%** (no transparency) to **100%**
+(fully transparent). The default is **50%**. Changes are saved for the next run and
+apply the next time transparency is enabled on a window.
+
 ## Planned features
-
-### Transparency
-
-Adjust the transparency of supported windows.
-
-This brings back an original WinRoll feature using modern layered-window APIs.
 
 ### Minimize to Tray
 
@@ -120,7 +128,7 @@ Initial planned controls:
 | Action | Mouse Gesture |
 |---|---|
 | Roll Up / Roll Down | Right-click title bar |
-| Transparency | Middle-click title bar |
+| Transparency (available now) | Middle-click title bar |
 | Always on Top (available now) | Middle-click Close button |
 | Send to Back (available now) | Right-click Close button |
 | Minimize to Tray | Middle-click Minimize button |

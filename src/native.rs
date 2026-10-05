@@ -18,7 +18,7 @@ use windows_sys::{
         Security::*,
         System::{Console::*, LibraryLoader::*, Threading::*},
         UI::{
-            Controls::{BST_CHECKED, BST_UNCHECKED},
+            Controls::*,
             HiDpi::*,
             Input::KeyboardAndMouse::{
                 GetAsyncKeyState, INPUT, INPUT_0, INPUT_KEYBOARD, KEYBDINPUT, KEYEVENTF_KEYUP,
@@ -42,12 +42,16 @@ static TRAY_ICONS: OnceLock<Option<(isize, isize)>> = OnceLock::new();
 static HAS_ROLLED_WINDOWS: AtomicBool = AtomicBool::new(false);
 static ABOUT_WINDOW: AtomicIsize = AtomicIsize::new(0);
 static OPTIONS_WINDOW: AtomicIsize = AtomicIsize::new(0);
+static TRANSPARENCY: AtomicU32 = AtomicU32::new(50);
 const ENABLE: u32 = 1;
 const UNROLL_ALL: u32 = 2;
 const PAUSE: u32 = 4;
 const EXIT: u32 = 8;
 const ABOUT: u32 = 16;
 const SETTINGS: u32 = 32;
+const RESTORE_TRANSPARENCY: u32 = 64;
+// TBM_GETPOS is WM_USER, omitted by the windows-sys metadata.
+const TBM_GETPOS: u32 = WM_USER;
 const TRAY_CALLBACK: u32 = WM_APP + 1;
 const TRAY_UPDATE: u32 = WM_APP + 2;
 const WORKER_DONE: u32 = WM_APP + 3;
@@ -73,11 +77,12 @@ struct Target {
 }
 enum Command {
     ProbeRight(POINT, SyncSender<Option<(Target, bool)>>),
-    ProbeClose(POINT, SyncSender<Option<(Target, bool)>>),
+    ProbeMiddle(POINT, SyncSender<Option<(Target, bool)>>),
     ProbeRolled(POINT, SyncSender<Option<Target>>),
     FocusRolled(isize, Instant),
     Toggle(Target),
     ToggleTopmost(Target),
+    ToggleTransparency(Target),
     SendToBack(Target),
 }
 struct Drag {
@@ -101,10 +106,24 @@ struct Manager {
     windows: HashMap<isize, Saved>,
     topmost: HashMap<isize, (Target, usize, bool)>,
     topmost_property: Vec<u16>,
+    transparent: HashMap<isize, Transparent>,
+    transparency_property: Vec<u16>,
+    transparency_recovery: bool,
+    roll_recovery: bool,
     exit_pending: bool,
     property: Vec<u16>,
     next_marker: usize,
     integrity: u32,
+}
+
+#[derive(Clone, Copy)]
+struct Transparent {
+    target: Target,
+    marker: usize,
+    layered: bool,
+    color: u32,
+    alpha: u8,
+    flags: u32,
 }
 
 fn log(message: impl std::fmt::Display) {
@@ -122,6 +141,10 @@ fn dimensions(r: RECT) -> (i32, i32) {
 }
 fn bounds(r: RECT) -> [i32; 4] {
     [r.left, r.top, r.right, r.bottom]
+}
+
+fn transparency_alpha(percent: u32) -> u8 {
+    ((100 - percent.min(100)) * 255 / 100) as u8
 }
 
 fn caption_height(dpi: u32) -> i32 {
@@ -239,6 +262,12 @@ impl Manager {
         Ok(Self {
             windows: HashMap::new(),
             topmost: HashMap::new(),
+            transparent: HashMap::new(),
+            transparency_recovery: false,
+            roll_recovery: false,
+            transparency_property: format!("WinRoll-RS.Transparency.{pid}\0")
+                .encode_utf16()
+                .collect(),
             topmost_property: format!("WinRoll-RS.Topmost.{pid}\0")
                 .encode_utf16()
                 .collect(),
@@ -489,6 +518,122 @@ impl Manager {
             ) == 0
             {
                 log(format!("FAIL topmost hwnd={:#x}", target.hwnd));
+            }
+        }
+    }
+
+    fn owns_transparency(&self, saved: Transparent) -> bool {
+        same_target(saved.target)
+            && unsafe {
+                GetPropW(
+                    saved.target.hwnd as HWND,
+                    self.transparency_property.as_ptr(),
+                ) as usize
+                    == saved.marker
+            }
+    }
+
+    fn restore_transparency(&mut self, key: isize) {
+        let Some(saved) = self.transparent.get(&key).copied() else {
+            return;
+        };
+        if !self.owns_transparency(saved) {
+            self.transparent.remove(&key);
+            return;
+        }
+        // Preserve unrelated extended styles and the target's original layered attributes.
+        unsafe {
+            let hwnd = key as HWND;
+            let restored = if saved.layered {
+                SetLayeredWindowAttributes(hwnd, saved.color, saved.alpha, saved.flags) != 0
+            } else {
+                let style = GetWindowLongW(hwnd, GWL_EXSTYLE) as u32;
+                SetLastError(0);
+                SetWindowLongW(hwnd, GWL_EXSTYLE, (style & !WS_EX_LAYERED) as i32);
+                GetLastError() == 0 && GetWindowLongW(hwnd, GWL_EXSTYLE) as u32 & WS_EX_LAYERED == 0
+            };
+            if restored {
+                RemovePropW(hwnd, self.transparency_property.as_ptr());
+                self.transparent.remove(&key);
+                RedrawWindow(
+                    hwnd,
+                    std::ptr::null(),
+                    null_mut(),
+                    RDW_INVALIDATE | RDW_FRAME | RDW_ALLCHILDREN,
+                );
+            }
+        }
+    }
+
+    fn restore_all_transparency(&mut self) {
+        for key in self.transparent.keys().copied().collect::<Vec<_>>() {
+            self.restore_transparency(key);
+        }
+    }
+
+    fn toggle_transparency(&mut self, target: Target) {
+        let hwnd = target.hwnd as HWND;
+        if !same_target(target)
+            || !visible_caption(hwnd)
+            || rect(hwnd).map(bounds) != Some(bounds(target.rect))
+            || integrity(target.pid) != Some(self.integrity)
+        {
+            return;
+        }
+        if let Some(saved) = self.transparent.get(&target.hwnd).copied() {
+            let owned = self.owns_transparency(saved);
+            self.restore_transparency(target.hwnd);
+            if owned {
+                return;
+            }
+        }
+        let percent = TRANSPARENCY.load(Ordering::Relaxed);
+        // Zero means no transparency; do not change windows with their own alpha effects.
+        if percent == 0 {
+            return;
+        }
+        unsafe {
+            let style = GetWindowLongW(hwnd, GWL_EXSTYLE) as u32;
+            let mut saved = Transparent {
+                target,
+                marker: self.next_marker,
+                layered: style & WS_EX_LAYERED != 0,
+                color: 0,
+                alpha: 255,
+                flags: 0,
+            };
+            // Per-pixel layered windows cannot be safely restored with this API.
+            if saved.layered
+                && GetLayeredWindowAttributes(
+                    hwnd,
+                    &mut saved.color,
+                    &mut saved.alpha,
+                    &mut saved.flags,
+                ) == 0
+            {
+                return;
+            }
+            self.next_marker += 1;
+            if SetPropW(
+                hwnd,
+                self.transparency_property.as_ptr(),
+                saved.marker as HANDLE,
+            ) == 0
+            {
+                return;
+            }
+            self.transparent.insert(target.hwnd, saved);
+            SetLastError(0);
+            SetWindowLongW(hwnd, GWL_EXSTYLE, (style | WS_EX_LAYERED) as i32);
+            if GetLastError() != 0
+                || SetLayeredWindowAttributes(
+                    hwnd,
+                    saved.color,
+                    transparency_alpha(percent),
+                    saved.flags | LWA_ALPHA,
+                ) == 0
+            {
+                self.restore_transparency(target.hwnd);
             }
         }
     }
@@ -824,12 +969,24 @@ impl Manager {
 
     fn publish_recovery(&self) {
         let mut affected = Vec::new();
-        for target in self.windows.values().map(|saved| saved.target).chain(
-            self.topmost
-                .values()
-                .filter(|_| self.exit_pending)
-                .map(|(target, _, _)| *target),
-        ) {
+        for target in self
+            .windows
+            .values()
+            .filter(|_| self.exit_pending || self.roll_recovery)
+            .map(|saved| saved.target)
+            .chain(
+                self.topmost
+                    .values()
+                    .filter(|_| self.exit_pending)
+                    .map(|(target, _, _)| *target),
+            )
+            .chain(
+                self.transparent
+                    .values()
+                    .filter(|_| self.exit_pending || self.transparency_recovery)
+                    .map(|saved| saved.target),
+            )
+        {
             let mut title = [0u16; 128];
             let length = unsafe { GetWindowTextW(target.hwnd as HWND, title.as_mut_ptr(), 128) };
             let name = if length > 0 {
@@ -863,14 +1020,28 @@ impl Manager {
             STOPPING.store(true, Ordering::Relaxed);
             return false;
         }
+        if action == RESTORE_TRANSPARENCY {
+            self.restore_all_transparency();
+            self.transparency_recovery = !self.transparent.is_empty();
+            if !self.exit_pending {
+                self.publish_recovery();
+                return false;
+            }
+        }
         if action == EXIT {
             STOPPING.store(true, Ordering::Relaxed);
             self.exit_pending = true;
         }
         let mut restored = self.restore_all();
+        self.roll_recovery = !restored;
+        if self.transparency_recovery {
+            self.restore_all_transparency();
+            self.transparency_recovery = !self.transparent.is_empty();
+        }
         if self.exit_pending {
             self.restore_topmost();
-            restored &= self.topmost.is_empty();
+            self.restore_all_transparency();
+            restored &= self.topmost.is_empty() && self.transparent.is_empty();
         }
         self.publish_recovery();
         log(format!("CONTROL action={action} restored={restored}"));
@@ -962,7 +1133,7 @@ unsafe extern "system" fn mouse_hook(code: i32, message: WPARAM, data: LPARAM) -
                     // A timed-out probe cannot change a window: only the subsequent command can.
                     let middle = message as u32 == WM_MBUTTONDOWN;
                     let probe = if middle {
-                        Command::ProbeClose(event.pt, reply)
+                        Command::ProbeMiddle(event.pt, reply)
                     } else {
                         Command::ProbeRight(event.pt, reply)
                     };
@@ -970,7 +1141,9 @@ unsafe extern "system" fn mouse_hook(code: i32, message: WPARAM, data: LPARAM) -
                         && let Ok(Some((target, close))) =
                             receive.recv_timeout(Duration::from_millis(40))
                         && sender
-                            .try_send(if middle {
+                            .try_send(if middle && !close {
+                                Command::ToggleTransparency(target)
+                            } else if middle {
                                 Command::ToggleTopmost(target)
                             } else if close {
                                 Command::SendToBack(target)
@@ -1173,6 +1346,18 @@ fn options_error(owner: HWND, error: &io::Error) {
     };
 }
 
+fn update_transparency_label(hwnd: HWND) {
+    let text: Vec<u16> = format!(
+        "&Transparency: {}% (0% opaque, 100% invisible)\0",
+        TRANSPARENCY.load(Ordering::Relaxed)
+    )
+    .encode_utf16()
+    .collect();
+    unsafe {
+        SetWindowTextW(GetDlgItem(hwnd, 5), text.as_ptr());
+    }
+}
+
 unsafe extern "system" fn options_proc(hwnd: HWND, message: u32, w: WPARAM, l: LPARAM) -> LRESULT {
     // SAFETY: this thread owns the options window and its standard child controls.
     unsafe {
@@ -1197,7 +1382,7 @@ unsafe extern "system" fn options_proc(hwnd: HWND, message: u32, w: WPARAM, l: L
                         300,
                         28,
                     ),
-                    (2, w!("Close"), BS_DEFPUSHBUTTON, 236, 80, 80, 28),
+                    (2, w!("Close"), BS_DEFPUSHBUTTON, 236, 180, 80, 28),
                 ] {
                     let control = CreateWindowExW(
                         0,
@@ -1223,6 +1408,85 @@ unsafe extern "system" fn options_proc(hwnd: HWND, message: u32, w: WPARAM, l: L
                         1,
                     );
                 }
+                let controls = INITCOMMONCONTROLSEX {
+                    dwSize: size_of::<INITCOMMONCONTROLSEX>() as u32,
+                    dwICC: ICC_BAR_CLASSES,
+                };
+                if InitCommonControlsEx(&controls) == 0 {
+                    return -1;
+                }
+                for (id, class, text, style, y, height) in [
+                    (5, w!("STATIC"), w!(""), 0, 62, 24),
+                    (
+                        4,
+                        TRACKBAR_CLASSW,
+                        w!("Transparency"),
+                        WS_TABSTOP | TBS_AUTOTICKS,
+                        88,
+                        36,
+                    ),
+                    (
+                        6,
+                        w!("STATIC"),
+                        w!("Invisible windows: use Restore transparency in the tray."),
+                        0,
+                        130,
+                        40,
+                    ),
+                ] {
+                    let control = CreateWindowExW(
+                        0,
+                        class,
+                        text,
+                        WS_CHILD | WS_VISIBLE | style,
+                        scale(20),
+                        scale(y),
+                        scale(300),
+                        scale(height),
+                        hwnd,
+                        id as HMENU,
+                        GetModuleHandleW(null_mut()),
+                        null_mut(),
+                    );
+                    if control.is_null() {
+                        return -1;
+                    }
+                    SendMessageW(
+                        control,
+                        WM_SETFONT,
+                        GetStockObject(DEFAULT_GUI_FONT) as usize,
+                        1,
+                    );
+                }
+                let slider = GetDlgItem(hwnd, 4);
+                SendMessageW(slider, TBM_SETRANGE, 1, 10 << 16);
+                SendMessageW(slider, TBM_SETPAGESIZE, 0, 1);
+                SendMessageW(
+                    slider,
+                    TBM_SETPOS,
+                    1,
+                    (TRANSPARENCY.load(Ordering::Relaxed) / 10) as isize,
+                );
+                // Keep keyboard order checkbox, labelled slider, Close.
+                SetWindowPos(
+                    GetDlgItem(hwnd, 5),
+                    GetDlgItem(hwnd, 3),
+                    0,
+                    0,
+                    0,
+                    0,
+                    SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE,
+                );
+                SetWindowPos(
+                    slider,
+                    GetDlgItem(hwnd, 5),
+                    0,
+                    0,
+                    0,
+                    0,
+                    SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE,
+                );
+                update_transparency_label(hwnd);
                 let checkbox = GetDlgItem(hwnd, 3);
                 SendMessageW(
                     checkbox,
@@ -1231,6 +1495,28 @@ unsafe extern "system" fn options_proc(hwnd: HWND, message: u32, w: WPARAM, l: L
                     0,
                 );
                 SetFocus(checkbox);
+                return 0;
+            }
+            WM_HSCROLL if l == GetDlgItem(hwnd, 4) as isize => {
+                let slider = GetDlgItem(hwnd, 4);
+                let percent = SendMessageW(slider, TBM_GETPOS, 0, 0) as u32 * 10;
+                if percent != TRANSPARENCY.load(Ordering::Relaxed) {
+                    match crate::transparency_settings::save(percent) {
+                        Ok(()) => {
+                            TRANSPARENCY.store(percent, Ordering::Relaxed);
+                        }
+                        Err(error) => {
+                            SendMessageW(
+                                slider,
+                                TBM_SETPOS,
+                                1,
+                                (TRANSPARENCY.load(Ordering::Relaxed) / 10) as isize,
+                            );
+                            options_error(hwnd, &error);
+                        }
+                    }
+                    update_transparency_label(hwnd);
+                }
                 return 0;
             }
             WM_COMMAND if w & 0xffff == 3 && (w >> 16) == BN_CLICKED as usize => {
@@ -1307,7 +1593,7 @@ fn show_auxiliary(owner: HWND, options: bool) {
             left: 0,
             top: 0,
             right: (if options { 340 } else { 320 }) * dpi as i32 / 96,
-            bottom: (if options { 128 } else { 150 }) * dpi as i32 / 96,
+            bottom: (if options { 228 } else { 150 }) * dpi as i32 / 96,
         };
         let style = WS_OVERLAPPED | WS_CAPTION | WS_SYSMENU;
         AdjustWindowRectExForDpi(&mut bounds, style, 0, WS_EX_DLGMODALFRAME, dpi);
@@ -1403,6 +1689,12 @@ unsafe extern "system" fn tray_proc(hwnd: HWND, message: u32, w: WPARAM, l: LPAR
                         w!("&Unroll all")
                     },
                 );
+                AppendMenuW(
+                    menu,
+                    MF_STRING,
+                    RESTORE_TRANSPARENCY as usize,
+                    w!("Restore &transparency"),
+                );
                 AppendMenuW(menu, MF_SEPARATOR, 0, std::ptr::null());
                 AppendMenuW(menu, MF_STRING, SETTINGS as usize, w!("&Options..."));
                 AppendMenuW(menu, MF_STRING, ABOUT as usize, w!("&About WinRoll RS"));
@@ -1429,7 +1721,10 @@ unsafe extern "system" fn tray_proc(hwnd: HWND, message: u32, w: WPARAM, l: LPAR
                 if action == SETTINGS {
                     show_auxiliary(hwnd, true);
                 }
-                if matches!(action, ENABLE | PAUSE | UNROLL_ALL | EXIT) {
+                if matches!(
+                    action,
+                    ENABLE | PAUSE | UNROLL_ALL | EXIT | RESTORE_TRANSPARENCY
+                ) {
                     request_control(action);
                 }
                 return 0;
@@ -1483,6 +1778,10 @@ pub fn run() -> Result<(), String> {
         return self_test(true);
     }
     let mut manager = Manager::new()?;
+    TRANSPARENCY.store(
+        crate::transparency_settings::load().map_err(|error| error.to_string())?,
+        Ordering::Relaxed,
+    );
     // Keep the experiment's mutex name so an old controller cannot run alongside the tray build.
     let mutex = unsafe { CreateMutexW(null_mut(), 0, w!("Local\\WinRoll-RS.Experiment")) };
     if mutex.is_null() {
@@ -1551,7 +1850,7 @@ pub fn run() -> Result<(), String> {
             let requests = CONTROL_REQUESTS.swap(0, Ordering::Relaxed);
             if requests != 0 {
                 // A stop request wins over Enable if multiple actions arrive while restoring.
-                let action = [EXIT, PAUSE, UNROLL_ALL, ENABLE]
+                let action = [EXIT, PAUSE, UNROLL_ALL, RESTORE_TRANSPARENCY, ENABLE]
                     .into_iter()
                     .find(|action| requests & action != 0)
                     .unwrap();
@@ -1583,6 +1882,16 @@ pub fn run() -> Result<(), String> {
             for key in closed {
                 manager.topmost.remove(&key);
             }
+            let stale: Vec<_> = manager
+                .transparent
+                .iter()
+                .filter(|(_, saved)| !manager.owns_transparency(**saved))
+                .map(|(key, _)| *key)
+                .collect();
+            changed |= !stale.is_empty();
+            for key in stale {
+                manager.transparent.remove(&key);
+            }
             if changed && RECOVERY_PENDING.load(Ordering::Relaxed) {
                 manager.publish_recovery();
                 unsafe {
@@ -1600,7 +1909,11 @@ pub fn run() -> Result<(), String> {
             if HAS_ROLLED_WINDOWS.swap(rolled, Ordering::Relaxed) != rolled {
                 unsafe { PostMessageW(tray_key as HWND, TRAY_UPDATE, 0, 0) };
             }
-            if manager.exit_pending && manager.windows.is_empty() && manager.topmost.is_empty() {
+            if manager.exit_pending
+                && manager.windows.is_empty()
+                && manager.topmost.is_empty()
+                && manager.transparent.is_empty()
+            {
                 break;
             }
             let wait = if DRAG_ACTIVE.load(Ordering::Relaxed) {
@@ -1628,18 +1941,21 @@ pub fn run() -> Result<(), String> {
                 Ok(Command::Toggle(target)) if !STOPPING.load(Ordering::Relaxed) => {
                     manager.toggle(target)
                 }
-                Ok(Command::ProbeClose(point, reply)) => {
+                Ok(Command::ProbeMiddle(point, reply)) => {
                     let target = if STOPPING.load(Ordering::Relaxed) {
                         None
                     } else {
                         manager
-                            .probe_hit(point, HTCLOSE)
-                            .map(|target| (target, true))
+                            .probe_hits(point, &[HTCAPTION, HTCLOSE])
+                            .map(|(target, hit)| (target, hit == HTCLOSE))
                     };
                     let _ = reply.try_send(target);
                 }
                 Ok(Command::ToggleTopmost(target)) if !STOPPING.load(Ordering::Relaxed) => {
                     manager.toggle_topmost(target)
+                }
+                Ok(Command::ToggleTransparency(target)) if !STOPPING.load(Ordering::Relaxed) => {
+                    manager.toggle_transparency(target)
                 }
                 Ok(Command::SendToBack(target)) if !STOPPING.load(Ordering::Relaxed) => {
                     manager.send_to_back(target)
@@ -1876,6 +2192,7 @@ fn self_test(interactive: bool) -> Result<(), String> {
             return Err("Close and caption gestures did not reject other hit regions".into());
         }
         self_test_topmost_exit(close_point)?;
+        self_test_transparency(point)?;
         self_test_topmost(&mut manager, close_point, false)?;
         self_test_topmost(&mut manager, close_point, true)?;
         self_test_send_to_back(&manager, close_point, second_hwnd, false)?;
@@ -2297,6 +2614,87 @@ fn self_test(interactive: bool) -> Result<(), String> {
     self_test_menu_exit()
 }
 
+fn self_test_transparency(point: POINT) -> Result<(), String> {
+    let mut manager = Manager::new()?;
+    let target = manager
+        .probe(point)
+        .ok_or("Transparency fixture caption not found")?;
+    let hwnd = target.hwnd as HWND;
+    let original_percent = TRANSPARENCY.load(Ordering::Relaxed);
+    let result = (|| -> Result<(), String> {
+        for percent in (0..=100).step_by(10) {
+            TRANSPARENCY.store(percent, Ordering::Relaxed);
+            manager.toggle_transparency(target);
+            unsafe {
+                let mut alpha = 255;
+                let mut flags = 0;
+                if percent > 0
+                    && (GetLayeredWindowAttributes(hwnd, null_mut(), &mut alpha, &mut flags) == 0
+                        || alpha != transparency_alpha(percent)
+                        || flags & LWA_ALPHA == 0)
+                {
+                    return Err(format!("Transparency {percent}% was not applied"));
+                }
+            }
+            if percent > 0 {
+                manager.toggle_transparency(target);
+            }
+            if !manager.transparent.is_empty()
+                || unsafe { GetWindowLongW(hwnd, GWL_EXSTYLE) } as u32 & WS_EX_LAYERED != 0
+            {
+                return Err("Transparency toggle did not restore non-layered style".into());
+            }
+        }
+        // Preserve a pre-existing alpha and color key, including on Exit.
+        unsafe {
+            let style = GetWindowLongW(hwnd, GWL_EXSTYLE) as u32;
+            SetWindowLongW(hwnd, GWL_EXSTYLE, (style | WS_EX_LAYERED) as i32);
+            if SetLayeredWindowAttributes(hwnd, 0x123456, 201, LWA_ALPHA | LWA_COLORKEY) == 0 {
+                return Err("Cannot configure original layered fixture".into());
+            }
+        }
+        TRANSPARENCY.store(100, Ordering::Relaxed);
+        manager.toggle_transparency(target);
+        manager.control(PAUSE);
+        if manager.transparent.is_empty() {
+            return Err("Pause discarded transparency".into());
+        }
+        manager.control(RESTORE_TRANSPARENCY);
+        if !manager.transparent.is_empty() || RECOVERY_PENDING.load(Ordering::Relaxed) {
+            return Err("Tray action did not restore transparency".into());
+        }
+        manager.toggle_transparency(target);
+        if !manager.control(EXIT) {
+            return Err("Exit did not restore transparency".into());
+        }
+        unsafe {
+            let mut color = 0;
+            let mut alpha = 0;
+            let mut flags = 0;
+            if GetLayeredWindowAttributes(hwnd, &mut color, &mut alpha, &mut flags) == 0
+                || color != 0x123456
+                || alpha != 201
+                || flags != LWA_ALPHA | LWA_COLORKEY
+            {
+                return Err("Original layered attributes were not restored".into());
+            }
+        }
+        Ok(())
+    })();
+    manager.restore_all_transparency();
+    unsafe {
+        let style = GetWindowLongW(hwnd, GWL_EXSTYLE) as u32;
+        SetWindowLongW(hwnd, GWL_EXSTYLE, (style & !WS_EX_LAYERED) as i32);
+    }
+    TRANSPARENCY.store(original_percent, Ordering::Relaxed);
+    STOPPING.store(false, Ordering::Relaxed);
+    result?;
+    log(
+        "PASS transparency 0–100%, toggle, Pause, tray restoration and original layered attributes on Exit",
+    );
+    Ok(())
+}
+
 fn self_test_topmost_exit(point: POINT) -> Result<(), String> {
     let mut manager = Manager::new()?;
     let target = manager
@@ -2475,6 +2873,15 @@ fn self_test_options() -> Result<(), String> {
         let result = (|| -> Result<(), String> {
             let checkbox = GetDlgItem(hwnd, 3);
             let close = GetDlgItem(hwnd, 2);
+            let slider = GetDlgItem(hwnd, 4);
+            if slider.is_null()
+                || SendMessageW(slider, TBM_GETRANGEMIN, 0, 0) != 0
+                || SendMessageW(slider, TBM_GETRANGEMAX, 0, 0) != 10
+                || SendMessageW(slider, TBM_GETPOS, 0, 0)
+                    != (TRANSPARENCY.load(Ordering::Relaxed) / 10) as isize
+            {
+                return Err("Options transparency slider has incorrect range or preference".into());
+            }
             if checkbox.is_null()
                 || close.is_null()
                 || windows_sys::Win32::UI::Input::KeyboardAndMouse::GetFocus() != checkbox
@@ -2492,6 +2899,15 @@ fn self_test_options() -> Result<(), String> {
                 message: WM_KEYDOWN,
                 wParam: 9, // VK_TAB
                 ..Default::default()
+            };
+            if IsDialogMessageW(hwnd, &tab) == 0
+                || windows_sys::Win32::UI::Input::KeyboardAndMouse::GetFocus() != slider
+            {
+                return Err("Options keyboard navigation did not focus transparency".into());
+            }
+            let tab = MSG {
+                hwnd: slider,
+                ..tab
             };
             if IsDialogMessageW(hwnd, &tab) == 0
                 || windows_sys::Win32::UI::Input::KeyboardAndMouse::GetFocus() != close

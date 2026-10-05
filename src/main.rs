@@ -7,6 +7,7 @@ mod accessibility;
 mod geometry;
 mod native;
 mod startup;
+mod transparency_settings;
 
 fn main() {
     if let Err(error) = native::run() {
