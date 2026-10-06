@@ -1242,13 +1242,33 @@ unsafe extern "system" fn about_proc(hwnd: HWND, message: u32, w: WPARAM, l: LPA
             WM_CREATE => {
                 let dpi = GetDpiForWindow(hwnd) as i32;
                 let scale = |n| n * dpi / 96;
+                let link = CreateWindowExW(
+                    0,
+                    w!("BUTTON"),
+                    w!("https://github.com/jedipi/WinRoll-RS"),
+                    WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_FLAT as u32,
+                    scale(20),
+                    scale(104),
+                    scale(280),
+                    scale(28),
+                    hwnd,
+                    2usize as HMENU,
+                    GetModuleHandleW(null_mut()),
+                    null_mut(),
+                );
+                SendMessageW(
+                    link,
+                    WM_SETFONT,
+                    GetStockObject(DEFAULT_GUI_FONT) as usize,
+                    1,
+                );
                 let button = CreateWindowExW(
                     0,
                     w!("BUTTON"),
                     w!("Close"),
-                    WS_CHILD | WS_VISIBLE | BS_DEFPUSHBUTTON as u32,
+                    WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_DEFPUSHBUTTON as u32,
                     scale(216),
-                    scale(104),
+                    scale(140),
                     scale(80),
                     scale(28),
                     hwnd,
@@ -1298,6 +1318,17 @@ unsafe extern "system" fn about_proc(hwnd: HWND, message: u32, w: WPARAM, l: LPA
             }
             WM_COMMAND if w & 0xffff == 1 => {
                 DestroyWindow(hwnd);
+                return 0;
+            }
+            WM_COMMAND if w & 0xffff == 2 && w >> 16 == BN_CLICKED as usize => {
+                ShellExecuteW(
+                    hwnd,
+                    w!("open"),
+                    w!("https://github.com/jedipi/WinRoll-RS"),
+                    std::ptr::null(),
+                    std::ptr::null(),
+                    SW_SHOWNORMAL,
+                );
                 return 0;
             }
             WM_CLOSE => {
@@ -1576,7 +1607,7 @@ fn show_auxiliary(owner: HWND, options: bool) {
             left: 0,
             top: 0,
             right: (if options { 340 } else { 320 }) * dpi as i32 / 96,
-            bottom: (if options { 228 } else { 150 }) * dpi as i32 / 96,
+            bottom: (if options { 228 } else { 186 }) * dpi as i32 / 96,
         };
         let style = WS_OVERLAPPED | WS_CAPTION | WS_SYSMENU;
         AdjustWindowRectExForDpi(&mut bounds, style, 0, WS_EX_DLGMODALFRAME, dpi);
@@ -2014,6 +2045,10 @@ fn pump_until_restored() {
             }
             let options = OPTIONS_WINDOW.load(Ordering::Relaxed) as HWND;
             if !options.is_null() && IsDialogMessageW(options, &msg) != 0 {
+                continue;
+            }
+            let about = ABOUT_WINDOW.load(Ordering::Relaxed) as HWND;
+            if !about.is_null() && IsDialogMessageW(about, &msg) != 0 {
                 continue;
             }
             TranslateMessage(&msg);
