@@ -44,6 +44,7 @@ static TRAY_ICONS: OnceLock<Option<(isize, isize)>> = OnceLock::new();
 static ABOUT_WINDOW: AtomicIsize = AtomicIsize::new(0);
 static OPTIONS_WINDOW: AtomicIsize = AtomicIsize::new(0);
 static TRANSPARENCY: AtomicU32 = AtomicU32::new(50);
+static IGNORE_MIDDLE: AtomicBool = AtomicBool::new(false);
 static RESTORE_TRAY_REQUESTS: Mutex<Vec<u32>> = Mutex::new(Vec::new());
 const ENABLE: u32 = 1;
 const UNROLL_ALL: u32 = 2;
@@ -1109,6 +1110,7 @@ unsafe extern "system" fn mouse_hook(code: i32, message: WPARAM, data: LPARAM) -
                 }
             }
             if matches!(message as u32, WM_RBUTTONDOWN | WM_MBUTTONDOWN)
+                && (message as u32 != WM_MBUTTONDOWN || !IGNORE_MIDDLE.load(Ordering::Relaxed))
                 && event.flags & LLMHF_LOWER_IL_INJECTED == 0
                 && !STOPPING.load(Ordering::Relaxed)
             {
@@ -1362,13 +1364,13 @@ fn options_error(owner: HWND, error: &io::Error) {
 
 fn update_transparency_label(hwnd: HWND) {
     let text: Vec<u16> = format!(
-        "&Transparency: {}% (0% opaque, 100% invisible)\0",
+        "{}% (0% opaque, 100% invisible)\0",
         TRANSPARENCY.load(Ordering::Relaxed)
     )
     .encode_utf16()
     .collect();
     unsafe {
-        SetWindowTextW(GetDlgItem(hwnd, 5), text.as_ptr());
+        SetWindowTextW(GetDlgItem(hwnd, 8), text.as_ptr());
     }
 }
 
@@ -1396,7 +1398,16 @@ unsafe extern "system" fn options_proc(hwnd: HWND, message: u32, w: WPARAM, l: L
                         300,
                         28,
                     ),
-                    (2, w!("Close"), BS_DEFPUSHBUTTON, 236, 180, 80, 28),
+                    (
+                        7,
+                        w!("&Ignore middle mouse button"),
+                        BS_AUTOCHECKBOX,
+                        20,
+                        58,
+                        300,
+                        28,
+                    ),
+                    (2, w!("Close"), BS_DEFPUSHBUTTON, 236, 248, 80, 28),
                 ] {
                     let control = CreateWindowExW(
                         0,
@@ -1430,21 +1441,29 @@ unsafe extern "system" fn options_proc(hwnd: HWND, message: u32, w: WPARAM, l: L
                     return -1;
                 }
                 for (id, class, text, style, y, height) in [
-                    (5, w!("STATIC"), w!(""), 0, 62, 24),
+                    (
+                        5,
+                        w!("BUTTON"),
+                        w!("&Transparency"),
+                        BS_GROUPBOX as u32,
+                        98,
+                        142,
+                    ),
                     (
                         4,
                         TRACKBAR_CLASSW,
                         w!("Transparency"),
                         WS_TABSTOP | TBS_AUTOTICKS,
-                        88,
+                        124,
                         36,
                     ),
+                    (8, w!("STATIC"), w!(""), 0, 164, 20),
                     (
                         6,
                         w!("STATIC"),
                         w!("Invisible windows: choose Exit in the tray to restore."),
                         0,
-                        130,
+                        190,
                         40,
                     ),
                 ] {
@@ -1453,9 +1472,9 @@ unsafe extern "system" fn options_proc(hwnd: HWND, message: u32, w: WPARAM, l: L
                         class,
                         text,
                         WS_CHILD | WS_VISIBLE | style,
-                        scale(20),
+                        scale(if matches!(id, 4 | 6 | 8) { 30 } else { 20 }),
                         scale(y),
-                        scale(300),
+                        scale(if matches!(id, 4 | 6 | 8) { 280 } else { 300 }),
                         scale(height),
                         hwnd,
                         id as HMENU,
@@ -1481,10 +1500,10 @@ unsafe extern "system" fn options_proc(hwnd: HWND, message: u32, w: WPARAM, l: L
                     1,
                     (TRANSPARENCY.load(Ordering::Relaxed) / 10) as isize,
                 );
-                // Keep keyboard order checkbox, labelled slider, Close.
+                // Keep keyboard order checkboxes, labelled slider, Close.
                 SetWindowPos(
                     GetDlgItem(hwnd, 5),
-                    GetDlgItem(hwnd, 3),
+                    GetDlgItem(hwnd, 7),
                     0,
                     0,
                     0,
@@ -1501,6 +1520,16 @@ unsafe extern "system" fn options_proc(hwnd: HWND, message: u32, w: WPARAM, l: L
                     SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE,
                 );
                 update_transparency_label(hwnd);
+                SendMessageW(
+                    GetDlgItem(hwnd, 7),
+                    BM_SETCHECK,
+                    if IGNORE_MIDDLE.load(Ordering::Relaxed) {
+                        BST_CHECKED
+                    } else {
+                        BST_UNCHECKED
+                    } as usize,
+                    0,
+                );
                 let checkbox = GetDlgItem(hwnd, 3);
                 SendMessageW(
                     checkbox,
@@ -1544,6 +1573,23 @@ unsafe extern "system" fn options_proc(hwnd: HWND, message: u32, w: WPARAM, l: L
                         0,
                     );
                     options_error(hwnd, &error);
+                }
+                return 0;
+            }
+            WM_COMMAND if w & 0xffff == 7 && (w >> 16) == BN_CLICKED as usize => {
+                let checkbox = GetDlgItem(hwnd, 7);
+                let ignore = SendMessageW(checkbox, BM_GETCHECK, 0, 0) == BST_CHECKED as isize;
+                match crate::transparency_settings::save_ignore_middle(ignore) {
+                    Ok(()) => IGNORE_MIDDLE.store(ignore, Ordering::Relaxed),
+                    Err(error) => {
+                        SendMessageW(
+                            checkbox,
+                            BM_SETCHECK,
+                            if ignore { BST_UNCHECKED } else { BST_CHECKED } as usize,
+                            0,
+                        );
+                        options_error(hwnd, &error);
+                    }
                 }
                 return 0;
             }
@@ -1607,7 +1653,7 @@ fn show_auxiliary(owner: HWND, options: bool) {
             left: 0,
             top: 0,
             right: (if options { 340 } else { 320 }) * dpi as i32 / 96,
-            bottom: (if options { 228 } else { 186 }) * dpi as i32 / 96,
+            bottom: (if options { 296 } else { 186 }) * dpi as i32 / 96,
         };
         let style = WS_OVERLAPPED | WS_CAPTION | WS_SYSMENU;
         AdjustWindowRectExForDpi(&mut bounds, style, 0, WS_EX_DLGMODALFRAME, dpi);
@@ -1617,7 +1663,7 @@ fn show_auxiliary(owner: HWND, options: bool) {
             WS_EX_DLGMODALFRAME,
             class.lpszClassName,
             if options {
-                w!("Options")
+                w!("WinRoll RS - Options")
             } else {
                 w!("About WinRoll RS")
             },
@@ -1800,6 +1846,10 @@ pub fn run() -> Result<(), String> {
     let mut manager = Manager::new()?;
     TRANSPARENCY.store(
         crate::transparency_settings::load().map_err(|error| error.to_string())?,
+        Ordering::Relaxed,
+    );
+    IGNORE_MIDDLE.store(
+        crate::transparency_settings::load_ignore_middle().map_err(|error| error.to_string())?,
         Ordering::Relaxed,
     );
     // Keep the experiment's mutex name so an old controller cannot run alongside the tray build.
@@ -2875,6 +2925,7 @@ fn self_test_send_to_back(
     Ok(())
 }
 
+#[cfg_attr(test, test)]
 fn self_test_options() -> Result<(), String> {
     let enabled = crate::startup::enabled().map_err(|error| error.to_string())?;
     // Read the real preference, but never click the checkbox or change startup in this UI check.
@@ -2888,6 +2939,13 @@ fn self_test_options() -> Result<(), String> {
             let checkbox = GetDlgItem(hwnd, 3);
             let close = GetDlgItem(hwnd, 2);
             let slider = GetDlgItem(hwnd, 4);
+            let ignore_middle = GetDlgItem(hwnd, 7);
+            if ignore_middle.is_null()
+                || (SendMessageW(ignore_middle, BM_GETCHECK, 0, 0) == BST_CHECKED as isize)
+                    != IGNORE_MIDDLE.load(Ordering::Relaxed)
+            {
+                return Err("Options does not reflect the ignore middle mouse preference".into());
+            }
             if slider.is_null()
                 || SendMessageW(slider, TBM_GETRANGEMIN, 0, 0) != 0
                 || SendMessageW(slider, TBM_GETRANGEMAX, 0, 0) != 10
@@ -2913,6 +2971,15 @@ fn self_test_options() -> Result<(), String> {
                 message: WM_KEYDOWN,
                 wParam: 9, // VK_TAB
                 ..Default::default()
+            };
+            if IsDialogMessageW(hwnd, &tab) == 0
+                || windows_sys::Win32::UI::Input::KeyboardAndMouse::GetFocus() != ignore_middle
+            {
+                return Err("Options keyboard navigation did not focus ignore middle mouse".into());
+            }
+            let tab = MSG {
+                hwnd: ignore_middle,
+                ..tab
             };
             if IsDialogMessageW(hwnd, &tab) == 0
                 || windows_sys::Win32::UI::Input::KeyboardAndMouse::GetFocus() != slider

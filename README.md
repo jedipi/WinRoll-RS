@@ -111,6 +111,11 @@ Open **Options...** from the WinRoll RS tray menu to open **Options**. Select
 **Automatically start with Windows** to launch WinRoll RS when you sign in, or
 clear it to disable startup.
 
+Select **Ignore middle mouse button** to disable WinRoll's middle-click actions
+(transparency, Always on Top, and minimize to tray). It is unchecked by default,
+applies immediately, and is saved for the next run. Other apps still receive
+their normal middle clicks.
+
 The **Transparency** slider has 10% steps from **0%** (no transparency) to **100%**
 (fully transparent). The default is **50%**. Changes are saved for the next run and
 apply the next time transparency is enabled on a window.
