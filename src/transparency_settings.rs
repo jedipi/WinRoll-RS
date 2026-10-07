@@ -19,6 +19,25 @@ pub fn save_ignore_middle(ignore: bool) -> io::Result<()> {
     save_dword(SETTINGS_KEY, "IgnoreMiddleMouseButton", u32::from(ignore))
 }
 
+pub fn load_minimize_as_menu() -> io::Result<bool> {
+    load_minimize_as_menu_from(SETTINGS_KEY)
+}
+
+pub fn save_minimize_as_menu(as_menu: bool) -> io::Result<()> {
+    save_dword(SETTINGS_KEY, "MinimizeAsMenu", u32::from(as_menu))
+}
+
+fn load_minimize_as_menu_from(key: &str) -> io::Result<bool> {
+    match load_dword(key, "MinimizeAsMenu", 0)? {
+        0 => Ok(false),
+        1 => Ok(true),
+        _ => Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            "Saved minimize as menu setting must be 0 or 1.",
+        )),
+    }
+}
+
 fn load_ignore_middle_from(key: &str) -> io::Result<bool> {
     match load_dword(key, "IgnoreMiddleMouseButton", 0)? {
         0 => Ok(false),
@@ -126,6 +145,16 @@ fn transparency_setting_round_trip() {
     let wide_key: Vec<u16> = key.encode_utf16().chain(Some(0)).collect();
     let result = (|| -> io::Result<()> {
         assert_eq!(load_from(&key)?, 50);
+        assert!(!load_minimize_as_menu_from(&key)?);
+        for as_menu in [true, false] {
+            save_dword(&key, "MinimizeAsMenu", u32::from(as_menu))?;
+            assert_eq!(load_minimize_as_menu_from(&key)?, as_menu);
+        }
+        save_dword(&key, "MinimizeAsMenu", 2)?;
+        assert_eq!(
+            load_minimize_as_menu_from(&key).unwrap_err().kind(),
+            io::ErrorKind::InvalidData
+        );
         assert!(!load_ignore_middle_from(&key)?);
         for ignore in [true, false] {
             save_dword(&key, "IgnoreMiddleMouseButton", u32::from(ignore))?;

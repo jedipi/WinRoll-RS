@@ -4,6 +4,7 @@ pub(super) struct Hidden {
     pub target: Target,
     marker: usize,
     icon: isize,
+    as_menu: bool,
     hide_confirmed: bool,
 }
 
@@ -18,6 +19,9 @@ impl Manager {
 
     fn hidden_icon(&self, id: u32, operation: u32) -> bool {
         let saved = &self.hidden[&id];
+        if saved.as_menu {
+            return true;
+        }
         let mut icon = NOTIFYICONDATAW {
             cbSize: size_of::<NOTIFYICONDATAW>() as u32,
             hWnd: self.tray_owner as HWND,
@@ -40,12 +44,41 @@ impl Manager {
                 if self.owns_hidden(&saved) {
                     RemovePropW(saved.target.hwnd as HWND, self.hidden_property.as_ptr());
                 }
-                DestroyIcon(saved.icon as HICON);
+                if !saved.as_menu {
+                    DestroyIcon(saved.icon as HICON);
+                }
             }
         }
+        self.publish_hidden_menu();
     }
 
-    pub(super) fn minimize_to_tray(&mut self, target: Target) {
+    pub(super) fn publish_hidden_menu(&self) {
+        let mut minimized = self
+            .hidden
+            .iter()
+            .filter(|(_, saved)| saved.as_menu && self.owns_hidden(saved))
+            .map(|(id, saved)| {
+                let mut title = [0u16; 512];
+                let length = unsafe {
+                    GetWindowTextW(
+                        saved.target.hwnd as HWND,
+                        title.as_mut_ptr(),
+                        title.len() as i32,
+                    )
+                };
+                let title = if length > 0 {
+                    String::from_utf16_lossy(&title[..length as usize])
+                } else {
+                    "(untitled)".into()
+                };
+                (*id, title)
+            })
+            .collect::<Vec<_>>();
+        minimized.sort_by_key(|(id, _)| *id);
+        *MINIMIZED_WINDOWS.lock().unwrap() = minimized;
+    }
+
+    pub(super) fn minimize_to_tray(&mut self, target: Target, as_menu: bool) {
         let hwnd = target.hwnd as HWND;
         if self.tray_owner == 0
             || !same_target(target)
@@ -70,33 +103,40 @@ impl Manager {
         };
         self.next_marker += 2;
         unsafe {
-            let mut source = 0;
-            SendMessageTimeoutW(
-                hwnd,
-                WM_GETICON,
-                ICON_SMALL2 as usize,
-                0,
-                SMTO_ABORTIFHUNG | SMTO_BLOCK,
-                20,
-                &mut source,
-            );
-            if source == 0 {
-                source = GetClassLongPtrW(hwnd, GCLP_HICONSM);
-            }
-            if source == 0 {
-                source = GetClassLongPtrW(hwnd, GCLP_HICON);
-            }
-            if source == 0 {
-                source = LoadIconW(null_mut(), IDI_APPLICATION) as usize;
-            }
-            let icon = CopyIcon(source as HICON);
-            if icon.is_null() {
-                return;
-            }
+            let icon = if as_menu {
+                null_mut()
+            } else {
+                let mut source = 0;
+                SendMessageTimeoutW(
+                    hwnd,
+                    WM_GETICON,
+                    ICON_SMALL2 as usize,
+                    0,
+                    SMTO_ABORTIFHUNG | SMTO_BLOCK,
+                    20,
+                    &mut source,
+                );
+                if source == 0 {
+                    source = GetClassLongPtrW(hwnd, GCLP_HICONSM);
+                }
+                if source == 0 {
+                    source = GetClassLongPtrW(hwnd, GCLP_HICON);
+                }
+                if source == 0 {
+                    source = LoadIconW(null_mut(), IDI_APPLICATION) as usize;
+                }
+                let icon = CopyIcon(source as HICON);
+                if icon.is_null() {
+                    return;
+                }
+                icon
+            };
             if !same_target(target)
                 || SetPropW(hwnd, self.hidden_property.as_ptr(), id as HANDLE) == 0
             {
-                DestroyIcon(icon);
+                if !icon.is_null() {
+                    DestroyIcon(icon);
+                }
                 return;
             }
             self.hidden.insert(
@@ -105,10 +145,12 @@ impl Manager {
                     target,
                     marker: id as usize,
                     icon: icon as isize,
+                    as_menu,
                     hide_confirmed: false,
                 },
             );
             // Install the recovery path before hiding the target.
+            self.publish_hidden_menu();
             if !self.hidden_icon(id, NIM_ADD) {
                 self.forget_hidden(id);
                 return;
@@ -149,7 +191,7 @@ impl Manager {
                 return true;
             }
             if Instant::now() >= deadline {
-                // Keep the icon and identity: the queued hide may still execute later.
+                // Keep the recovery entry and identity: the queued hide may execute later.
                 return false;
             }
             thread::sleep(Duration::from_millis(10));
@@ -233,7 +275,13 @@ impl Manager {
 
     pub(super) fn recreate_hidden_icons(&mut self) {
         self.clean_hidden();
-        for id in self.hidden.keys().copied().collect::<Vec<_>>() {
+        for id in self
+            .hidden
+            .iter()
+            .filter(|(_, saved)| !saved.as_menu)
+            .map(|(id, _)| *id)
+            .collect::<Vec<_>>()
+        {
             if !self.hidden_icon(id, NIM_ADD) {
                 // Explorer could not recreate the recovery icon; expose the window instead.
                 self.restore_hidden(id, false);
@@ -298,11 +346,11 @@ pub(super) fn self_test() -> Result<(), String> {
         let target = point.1;
         let mut stale = target;
         stale.pid = 0;
-        manager.minimize_to_tray(stale);
+        manager.minimize_to_tray(stale, false);
         if !manager.hidden.is_empty() {
             return Err("Stale target was hidden".into());
         }
-        manager.minimize_to_tray(target);
+        manager.minimize_to_tray(target, false);
         wait(false)?;
         let id = *manager
             .hidden
@@ -337,13 +385,75 @@ pub(super) fn self_test() -> Result<(), String> {
         if !manager.hidden.is_empty() || rect(hwnd).map(bounds) != Some(bounds(initial)) {
             return Err("Tray restore lost state or changed geometry".into());
         }
+        if !MINIMIZED_WINDOWS.lock().unwrap().is_empty() {
+            return Err("Icon-mode window was published in the Minimized menu".into());
+        }
+        manager.minimize_to_tray(target, true);
+        wait(false)?;
+        let menu_id = *manager.hidden.keys().next().ok_or("Missing menu window")?;
+        if manager.hidden[&menu_id].icon != 0
+            || *MINIMIZED_WINDOWS.lock().unwrap()
+                != [(menu_id, "WinRoll RS native test fixture".into())]
+        {
+            return Err("Menu mode copied an icon or omitted the window title/ID".into());
+        }
+        unsafe { SetWindowTextW(hwnd, w!("Renamed & menu fixture")) };
+        manager.publish_hidden_menu();
+        let menu_entries = MINIMIZED_WINDOWS.lock().unwrap().clone();
+        if menu_entries != [(menu_id, "Renamed & menu fixture".into())] {
+            return Err("Minimized menu did not refresh the window title".into());
+        }
+        let menu_valid = unsafe {
+            let menu = CreatePopupMenu();
+            let submenu = append_minimized_menu(menu, &menu_entries);
+            let mut text = [0u16; 128];
+            let length = GetMenuStringW(submenu, 0, text.as_mut_ptr(), 128, MF_BYPOSITION);
+            let valid = !menu.is_null()
+                && !submenu.is_null()
+                && GetMenuItemCount(submenu) == 1
+                && GetMenuItemID(submenu, 0) == MINIMIZED_MENU_FIRST
+                && String::from_utf16_lossy(&text[..length.max(0) as usize])
+                    == "Renamed && menu fixture";
+            DestroyMenu(menu);
+            valid
+        };
+        if !menu_valid {
+            return Err("Minimized submenu omitted the title or restore command".into());
+        }
+        unsafe { SetWindowTextW(hwnd, w!("")) };
+        manager.publish_hidden_menu();
+        if *MINIMIZED_WINDOWS.lock().unwrap() != [(menu_id, "(untitled)".into())] {
+            return Err("Minimized menu omitted the untitled-window fallback".into());
+        }
+        manager.recreate_hidden_icons();
+        if manager.hidden[&menu_id].icon != 0 || unsafe { IsWindowVisible(hwnd) } != 0 {
+            return Err("Icon recreation changed a menu-mode window".into());
+        }
+        restore_minimized_selection(MINIMIZED_MENU_FIRST, &menu_entries);
+        let requests = std::mem::take(&mut *RESTORE_TRAY_REQUESTS.lock().unwrap());
+        if requests != [menu_id] {
+            return Err("Minimized submenu selection did not queue restoration".into());
+        }
+        for id in requests {
+            manager.restore_hidden(id, true);
+        }
+        wait(true)?;
+        if !manager.hidden.is_empty()
+            || !MINIMIZED_WINDOWS.lock().unwrap().is_empty()
+            || rect(hwnd).map(bounds) != Some(bounds(initial))
+        {
+            return Err("Menu restoration retained its entry or changed geometry".into());
+        }
         manager.control(ENABLE);
         manager.toggle(target);
         let rolled = rect(hwnd).ok_or("Missing rolled bounds")?;
-        manager.minimize_to_tray(Target {
-            rect: rolled,
-            ..target
-        });
+        manager.minimize_to_tray(
+            Target {
+                rect: rolled,
+                ..target
+            },
+            false,
+        );
         wait(false)?;
         manager.restore_all_hidden();
         if rect(hwnd).map(bounds) != Some(bounds(rolled)) || manager.windows.is_empty() {
@@ -364,10 +474,13 @@ pub(super) fn self_test() -> Result<(), String> {
         let maximized = rect(hwnd).ok_or("Missing maximized bounds")?;
         FIXTURE_DELAYS_HIDE.store(key, Ordering::Relaxed);
         FIXTURE_REFUSES_SHOW.store(key, Ordering::Relaxed);
-        manager.minimize_to_tray(Target {
-            rect: maximized,
-            ..target
-        });
+        manager.minimize_to_tray(
+            Target {
+                rect: maximized,
+                ..target
+            },
+            true,
+        );
         if manager.control(EXIT)
             || manager.hidden.is_empty()
             || !RECOVERY_PENDING.load(Ordering::Relaxed)
@@ -380,14 +493,20 @@ pub(super) fn self_test() -> Result<(), String> {
         if !manager.control(EXIT) {
             return Err("Exit did not restore hidden windows".into());
         }
+        if !MINIMIZED_WINDOWS.lock().unwrap().is_empty() {
+            return Err("Exit retained a minimized menu entry".into());
+        }
         wait(true)?;
         if unsafe { IsZoomed(hwnd) } == 0 || rect(hwnd).map(bounds) != Some(bounds(maximized)) {
             return Err("Tray Exit changed maximized state".into());
         }
-        manager.minimize_to_tray(Target {
-            rect: maximized,
-            ..target
-        });
+        manager.minimize_to_tray(
+            Target {
+                rect: maximized,
+                ..target
+            },
+            true,
+        );
         wait(false)?;
         unsafe {
             PostMessageW(hwnd, WM_CLOSE, 0, 0);
@@ -399,8 +518,11 @@ pub(super) fn self_test() -> Result<(), String> {
             }
             thread::sleep(Duration::from_millis(10));
         }
-        if !manager.clean_hidden() || !manager.hidden.is_empty() {
-            return Err("Closed hidden window retained its tray icon".into());
+        if !manager.clean_hidden()
+            || !manager.hidden.is_empty()
+            || !MINIMIZED_WINDOWS.lock().unwrap().is_empty()
+        {
+            return Err("Closed hidden window retained its recovery entry".into());
         }
         Ok(())
     })();
@@ -417,7 +539,7 @@ pub(super) fn self_test() -> Result<(), String> {
     RECOVERY_PENDING.store(false, Ordering::Relaxed);
     result?;
     log(
-        "PASS Minimize hit-test, tray hide/click/restore, Pause, Unroll all, icon recreation, rolled/maximized geometry, Exit and closed-window cleanup",
+        "PASS Minimize hit-test, tray icon/menu hide/restore, live menu titles, Pause, Unroll all, icon recreation, rolled/maximized geometry, Exit and closed-window cleanup",
     );
     Ok(())
 }

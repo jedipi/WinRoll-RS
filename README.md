@@ -92,13 +92,17 @@ that use per-pixel layered rendering are excluded.
 ### Minimize to Tray
 
 Middle-click a window's **Minimize** button to hide it from the desktop and taskbar
-and give it a notification-area icon. Click that icon to show the window again.
-Check the hidden-icons overflow if the icon is not immediately visible.
+using the method selected in Options:
 
-Pause disables the gesture but keeps hidden windows available through their icons.
+- **As icon** (the default) gives each window a notification-area icon. Click the
+  icon to restore it; check the hidden-icons overflow if necessary.
+- **As menu** adds the window title under **Minimized** in WinRoll's tray menu.
+  Click the title to restore it. The submenu shows **(none)** when empty.
+
+Pause disables the gesture but keeps hidden windows available through their icons or menu entries.
 Unroll all leaves them hidden. Exit shows them before quitting, preserving their
 normal or maximized state; restoring an individual rolled window keeps it rolled.
-If a window cannot be shown, WinRoll keeps its icon and lets you retry.
+If a window cannot be shown, WinRoll keeps its icon or menu entry and lets you retry.
 
 The button must report the native Minimize hit region. Unrecognized custom controls
 and windows running at a different integrity level retain their normal clicks.
@@ -119,6 +123,10 @@ their normal middle clicks.
 The **Transparency** slider has 10% steps from **0%** (no transparency) to **100%**
 (fully transparent). The default is **50%**. Changes are saved for the next run and
 apply the next time transparency is enabled on a window.
+
+The **Minimize to tray** group offers **As icon** and **As menu**. The choice is
+saved for the next run and applies to windows minimized afterward. Windows already
+hidden keep their existing icon or menu entry until restored.
 
 ## Planned features
 

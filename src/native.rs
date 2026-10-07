@@ -45,6 +45,8 @@ static ABOUT_WINDOW: AtomicIsize = AtomicIsize::new(0);
 static OPTIONS_WINDOW: AtomicIsize = AtomicIsize::new(0);
 static TRANSPARENCY: AtomicU32 = AtomicU32::new(50);
 static IGNORE_MIDDLE: AtomicBool = AtomicBool::new(false);
+static MINIMIZE_AS_MENU: AtomicBool = AtomicBool::new(false);
+static MINIMIZED_WINDOWS: Mutex<Vec<(u32, String)>> = Mutex::new(Vec::new());
 static RESTORE_TRAY_REQUESTS: Mutex<Vec<u32>> = Mutex::new(Vec::new());
 const ENABLE: u32 = 1;
 const UNROLL_ALL: u32 = 2;
@@ -60,6 +62,7 @@ const TRAY_CALLBACK: u32 = WM_APP + 1;
 const TRAY_UPDATE: u32 = WM_APP + 2;
 const WORKER_DONE: u32 = WM_APP + 3;
 const WINDOW_TRAY_CALLBACK: u32 = WM_APP + 4;
+const MINIMIZED_MENU_FIRST: u32 = 0x10000;
 const NIN_KEYSELECT: u32 = NIN_SELECT | NINF_KEY;
 const ALT_TAP_TAG: usize = 0x0057_494e_414c_5421;
 static SUPPRESS_UP: AtomicBool = AtomicBool::new(false);
@@ -1407,7 +1410,25 @@ unsafe extern "system" fn options_proc(hwnd: HWND, message: u32, w: WPARAM, l: L
                         300,
                         28,
                     ),
-                    (2, w!("Close"), BS_DEFPUSHBUTTON, 236, 248, 80, 28),
+                    (
+                        10,
+                        w!("As &icon"),
+                        BS_AUTORADIOBUTTON | WS_GROUP as i32,
+                        40,
+                        272,
+                        120,
+                        24,
+                    ),
+                    (11, w!("As &menu"), BS_AUTORADIOBUTTON, 180, 272, 120, 24),
+                    (
+                        2,
+                        w!("Close"),
+                        BS_DEFPUSHBUTTON | WS_GROUP as i32,
+                        236,
+                        328,
+                        80,
+                        28,
+                    ),
                 ] {
                     let control = CreateWindowExW(
                         0,
@@ -1441,6 +1462,14 @@ unsafe extern "system" fn options_proc(hwnd: HWND, message: u32, w: WPARAM, l: L
                     return -1;
                 }
                 for (id, class, text, style, y, height) in [
+                    (
+                        9,
+                        w!("BUTTON"),
+                        w!("Minimize to tray"),
+                        BS_GROUPBOX as u32,
+                        248,
+                        64,
+                    ),
                     (
                         5,
                         w!("BUTTON"),
@@ -1520,6 +1549,16 @@ unsafe extern "system" fn options_proc(hwnd: HWND, message: u32, w: WPARAM, l: L
                     SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE,
                 );
                 update_transparency_label(hwnd);
+                CheckRadioButton(
+                    hwnd,
+                    10,
+                    11,
+                    if MINIMIZE_AS_MENU.load(Ordering::Relaxed) {
+                        11
+                    } else {
+                        10
+                    },
+                );
                 SendMessageW(
                     GetDlgItem(hwnd, 7),
                     BM_SETCHECK,
@@ -1593,6 +1632,26 @@ unsafe extern "system" fn options_proc(hwnd: HWND, message: u32, w: WPARAM, l: L
                 }
                 return 0;
             }
+            WM_COMMAND if matches!(w & 0xffff, 10 | 11) && (w >> 16) == BN_CLICKED as usize => {
+                let as_menu = w & 0xffff == 11;
+                match crate::transparency_settings::save_minimize_as_menu(as_menu) {
+                    Ok(()) => MINIMIZE_AS_MENU.store(as_menu, Ordering::Relaxed),
+                    Err(error) => {
+                        CheckRadioButton(
+                            hwnd,
+                            10,
+                            11,
+                            if MINIMIZE_AS_MENU.load(Ordering::Relaxed) {
+                                11
+                            } else {
+                                10
+                            },
+                        );
+                        options_error(hwnd, &error);
+                    }
+                }
+                return 0;
+            }
             WM_COMMAND if matches!(w & 0xffff, 1 | 2) => {
                 DestroyWindow(hwnd);
                 return 0;
@@ -1653,7 +1712,7 @@ fn show_auxiliary(owner: HWND, options: bool) {
             left: 0,
             top: 0,
             right: (if options { 340 } else { 320 }) * dpi as i32 / 96,
-            bottom: (if options { 296 } else { 186 }) * dpi as i32 / 96,
+            bottom: (if options { 376 } else { 186 }) * dpi as i32 / 96,
         };
         let style = WS_OVERLAPPED | WS_CAPTION | WS_SYSMENU;
         AdjustWindowRectExForDpi(&mut bounds, style, 0, WS_EX_DLGMODALFRAME, dpi);
@@ -1688,6 +1747,46 @@ fn show_auxiliary(owner: HWND, options: bool) {
                 SetFocus(GetDlgItem(hwnd, 3));
             }
         }
+    }
+}
+
+fn append_minimized_menu(menu: HMENU, windows: &[(u32, String)]) -> HMENU {
+    // SAFETY: the UI thread owns both menus; the parent takes ownership of the submenu.
+    unsafe {
+        let submenu = CreatePopupMenu();
+        if submenu.is_null() {
+            return submenu;
+        }
+        if windows.is_empty() {
+            AppendMenuW(submenu, MF_STRING | MF_GRAYED, 0, w!("(none)"));
+        }
+        for (index, (_, title)) in windows.iter().enumerate() {
+            let label: Vec<u16> = title
+                .replace('&', "&&")
+                .encode_utf16()
+                .chain(Some(0))
+                .collect();
+            AppendMenuW(
+                submenu,
+                MF_STRING,
+                MINIMIZED_MENU_FIRST as usize + index,
+                label.as_ptr(),
+            );
+        }
+        if AppendMenuW(menu, MF_POPUP, submenu as usize, w!("&Minimized")) == 0 {
+            DestroyMenu(submenu);
+            return null_mut();
+        }
+        submenu
+    }
+}
+
+fn restore_minimized_selection(action: u32, windows: &[(u32, String)]) {
+    if let Some((id, _)) = action
+        .checked_sub(MINIMIZED_MENU_FIRST)
+        .and_then(|index| windows.get(index as usize))
+    {
+        RESTORE_TRAY_REQUESTS.lock().unwrap().push(*id);
     }
 }
 
@@ -1727,6 +1826,9 @@ unsafe extern "system" fn tray_proc(hwnd: HWND, message: u32, w: WPARAM, l: LPAR
                 if menu.is_null() {
                     return 0;
                 }
+                let minimized = MINIMIZED_WINDOWS.lock().unwrap().clone();
+                append_minimized_menu(menu, &minimized);
+                AppendMenuW(menu, MF_SEPARATOR, 0, std::ptr::null());
                 let paused = STOPPING.load(Ordering::Relaxed);
                 let flags = if paused && RECOVERY_PENDING.load(Ordering::Relaxed) {
                     MF_STRING | MF_GRAYED
@@ -1784,6 +1886,7 @@ unsafe extern "system" fn tray_proc(hwnd: HWND, message: u32, w: WPARAM, l: LPAR
                 DestroyMenu(menu);
                 PostMessageW(hwnd, WM_NULL, 0, 0);
                 tray_icon(hwnd, NIM_SETFOCUS);
+                restore_minimized_selection(action, &minimized);
                 if action == ABOUT {
                     show_auxiliary(hwnd, false);
                 }
@@ -1850,6 +1953,10 @@ pub fn run() -> Result<(), String> {
     );
     IGNORE_MIDDLE.store(
         crate::transparency_settings::load_ignore_middle().map_err(|error| error.to_string())?,
+        Ordering::Relaxed,
+    );
+    MINIMIZE_AS_MENU.store(
+        crate::transparency_settings::load_minimize_as_menu().map_err(|error| error.to_string())?,
         Ordering::Relaxed,
     );
     // Keep the experiment's mutex name so an old controller cannot run alongside the tray build.
@@ -1940,6 +2047,7 @@ pub fn run() -> Result<(), String> {
                 manager.restore_hidden(id, true);
             }
             let hidden_changed = manager.clean_hidden() || restored_hidden;
+            manager.publish_hidden_menu();
             // Closing a rolled window needs no further user action to release its state.
             let closed: Vec<_> = manager
                 .windows
@@ -2027,7 +2135,7 @@ pub fn run() -> Result<(), String> {
                     manager.toggle_topmost(target)
                 }
                 Ok(Command::MinimizeToTray(target)) if !STOPPING.load(Ordering::Relaxed) => {
-                    manager.minimize_to_tray(target)
+                    manager.minimize_to_tray(target, MINIMIZE_AS_MENU.load(Ordering::Relaxed))
                 }
                 Ok(Command::ToggleTransparency(target)) if !STOPPING.load(Ordering::Relaxed) => {
                     manager.toggle_transparency(target)
@@ -2927,6 +3035,16 @@ fn self_test_send_to_back(
 
 #[cfg_attr(test, test)]
 fn self_test_options() -> Result<(), String> {
+    let original = MINIMIZE_AS_MENU.load(Ordering::Relaxed);
+    let result = [false, true].into_iter().try_for_each(|as_menu| {
+        MINIMIZE_AS_MENU.store(as_menu, Ordering::Relaxed);
+        check_options_window()
+    });
+    MINIMIZE_AS_MENU.store(original, Ordering::Relaxed);
+    result
+}
+
+fn check_options_window() -> Result<(), String> {
     let enabled = crate::startup::enabled().map_err(|error| error.to_string())?;
     // Read the real preference, but never click the checkbox or change startup in this UI check.
     unsafe {
@@ -2940,6 +3058,18 @@ fn self_test_options() -> Result<(), String> {
             let close = GetDlgItem(hwnd, 2);
             let slider = GetDlgItem(hwnd, 4);
             let ignore_middle = GetDlgItem(hwnd, 7);
+            let as_icon = GetDlgItem(hwnd, 10);
+            let as_menu = GetDlgItem(hwnd, 11);
+            let menu_preference = MINIMIZE_AS_MENU.load(Ordering::Relaxed);
+            if as_icon.is_null()
+                || as_menu.is_null()
+                || (SendMessageW(as_icon, BM_GETCHECK, 0, 0) == BST_CHECKED as isize)
+                    == menu_preference
+                || (SendMessageW(as_menu, BM_GETCHECK, 0, 0) == BST_CHECKED as isize)
+                    != menu_preference
+            {
+                return Err("Options does not reflect the minimize to tray preference".into());
+            }
             if ignore_middle.is_null()
                 || (SendMessageW(ignore_middle, BM_GETCHECK, 0, 0) == BST_CHECKED as isize)
                     != IGNORE_MIDDLE.load(Ordering::Relaxed)
@@ -2990,6 +3120,13 @@ fn self_test_options() -> Result<(), String> {
                 hwnd: slider,
                 ..tab
             };
+            let radio = if menu_preference { as_menu } else { as_icon };
+            if IsDialogMessageW(hwnd, &tab) == 0
+                || windows_sys::Win32::UI::Input::KeyboardAndMouse::GetFocus() != radio
+            {
+                return Err("Options keyboard navigation did not focus minimize to tray".into());
+            }
+            let tab = MSG { hwnd: radio, ..tab };
             if IsDialogMessageW(hwnd, &tab) == 0
                 || windows_sys::Win32::UI::Input::KeyboardAndMouse::GetFocus() != close
             {
