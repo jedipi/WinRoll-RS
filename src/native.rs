@@ -34,10 +34,16 @@ use windows_sys::{
 
 mod tray_windows;
 
+use crate::localization::{self, text};
+
+fn wide_text(english: &str) -> Vec<u16> {
+    text(english).encode_utf16().chain(Some(0)).collect()
+}
+
 static COMMANDS: OnceLock<SyncSender<Command>> = OnceLock::new();
 static CONTROL_REQUESTS: AtomicU32 = AtomicU32::new(0);
 static RECOVERY_PENDING: AtomicBool = AtomicBool::new(false);
-static RECOVERY_WINDOWS: Mutex<Vec<String>> = Mutex::new(Vec::new());
+static RECOVERY_WINDOWS: Mutex<Vec<(String, u32, isize)>> = Mutex::new(Vec::new());
 static WORKER_FINISHED: AtomicBool = AtomicBool::new(false);
 static TASKBAR_CREATED: OnceLock<u32> = OnceLock::new();
 static TRAY_ICONS: OnceLock<Option<(isize, isize)>> = OnceLock::new();
@@ -1077,15 +1083,8 @@ impl Manager {
         {
             let mut title = [0u16; 128];
             let length = unsafe { GetWindowTextW(target.hwnd as HWND, title.as_mut_ptr(), 128) };
-            let name = if length > 0 {
-                String::from_utf16_lossy(&title[..length as usize])
-            } else {
-                "(untitled)".into()
-            };
-            affected.push(format!(
-                "{name} (PID {}, HWND {:#x})",
-                target.pid, target.hwnd
-            ));
+            let name = String::from_utf16_lossy(&title[..length as usize]);
+            affected.push((name, target.pid, target.hwnd));
         }
         affected.sort();
         affected.dedup();
@@ -1296,7 +1295,7 @@ fn tray_icon(hwnd: HWND, operation: u32) -> bool {
     } else {
         "WinRoll RS - enabled"
     };
-    for (slot, value) in icon.szTip.iter_mut().zip(tip.encode_utf16()) {
+    for (slot, value) in icon.szTip.iter_mut().zip(text(tip).encode_utf16()) {
         *slot = value;
     }
     // SAFETY: icon is initialized and lives through each shell call; the stock icon is shared.
@@ -1381,7 +1380,7 @@ unsafe extern "system" fn about_proc(hwnd: HWND, message: u32, w: WPARAM, l: LPA
                 let button = CreateWindowExW(
                     0,
                     w!("BUTTON"),
-                    w!("Close"),
+                    wide_text("Close").as_ptr(),
                     WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_DEFPUSHBUTTON as u32,
                     scale(216),
                     scale(140),
@@ -1423,10 +1422,13 @@ unsafe extern "system" fn about_proc(hwnd: HWND, message: u32, w: WPARAM, l: LPA
                 SetBkMode(dc, TRANSPARENT as i32);
                 for (line, y) in [
                     ("WinRoll RS", 22),
-                    (concat!("Version ", env!("CARGO_PKG_VERSION")), 48),
+                    (
+                        &text("Version {version}").replace("{version}", env!("CARGO_PKG_VERSION")),
+                        48,
+                    ),
                     ("Created by Kin Tam", 74),
                 ] {
-                    let wide: Vec<u16> = line.encode_utf16().collect();
+                    let wide: Vec<u16> = text(line).encode_utf16().collect();
                     TextOutW(dc, scale(68), scale(y), wide.as_ptr(), wide.len() as i32);
                 }
                 EndPaint(hwnd, &paint);
@@ -1468,7 +1470,8 @@ unsafe extern "system" fn about_proc(hwnd: HWND, message: u32, w: WPARAM, l: LPA
 }
 
 fn options_error(owner: HWND, error: &io::Error) {
-    let text: Vec<u16> = format!("Cannot access the Windows startup setting.\n\n{error}")
+    let text: Vec<u16> = text("Cannot access the Windows setting.\n\n{error}")
+        .replace("{error}", text(&error.to_string()))
         .encode_utf16()
         .chain(Some(0))
         .collect();
@@ -1476,21 +1479,74 @@ fn options_error(owner: HWND, error: &io::Error) {
         MessageBoxW(
             owner,
             text.as_ptr(),
-            w!("WinRoll RS Options"),
+            wide_text("WinRoll RS Options").as_ptr(),
             MB_OK | MB_ICONERROR,
         )
     };
 }
 
 fn update_transparency_label(hwnd: HWND) {
-    let text: Vec<u16> = format!(
-        "{}% (0% opaque, 100% invisible)\0",
-        TRANSPARENCY.load(Ordering::Relaxed)
-    )
-    .encode_utf16()
-    .collect();
+    let text = wide_text(&text("{percent}% (0% opaque, 100% invisible)").replace(
+        "{percent}",
+        &TRANSPARENCY.load(Ordering::Relaxed).to_string(),
+    ));
     unsafe {
         SetWindowTextW(GetDlgItem(hwnd, 8), text.as_ptr());
+    }
+}
+
+fn populate_languages(combo: HWND) {
+    unsafe {
+        SendMessageW(combo, CB_RESETCONTENT, 0, 0);
+        for (index, (id, label)) in localization::choices().enumerate() {
+            // Native language names must not be translated.
+            let label: Vec<u16> = label.encode_utf16().chain(Some(0)).collect();
+            SendMessageW(combo, CB_ADDSTRING, 0, label.as_ptr() as isize);
+            if id == localization::preference() {
+                SendMessageW(combo, CB_SETCURSEL, index, 0);
+            }
+        }
+    }
+}
+
+fn refresh_options_language(hwnd: HWND) {
+    // SAFETY: called on the UI thread; controls remain alive and keep their focus/state.
+    unsafe {
+        SetWindowTextW(hwnd, wide_text("WinRoll RS - Options").as_ptr());
+        for (id, label) in [
+            (3, "&Automatically start with Windows"),
+            (7, "&Ignore middle mouse button"),
+            (10, "As &icon"),
+            (11, "As &menu"),
+            (2, "Close"),
+            (9, "Minimize to tray"),
+            (5, "&Transparency"),
+            (4, "Transparency"),
+            (6, "Invisible windows: choose Exit in the tray to restore."),
+            (12, "&Language"),
+        ] {
+            SetWindowTextW(GetDlgItem(hwnd, id), wide_text(label).as_ptr());
+        }
+        populate_languages(GetDlgItem(hwnd, 13));
+        update_transparency_label(hwnd);
+        InvalidateRect(hwnd, std::ptr::null(), 1);
+    }
+}
+
+fn apply_language(hwnd: HWND, preference: u32) {
+    localization::set_preference(preference);
+    refresh_options_language(hwnd);
+    unsafe {
+        let about = ABOUT_WINDOW.load(Ordering::Relaxed) as HWND;
+        if !about.is_null() {
+            SetWindowTextW(about, wide_text("About WinRoll RS").as_ptr());
+            SetWindowTextW(GetDlgItem(about, 1), wide_text("Close").as_ptr());
+            InvalidateRect(about, std::ptr::null(), 1);
+        }
+        let owner = GetWindow(hwnd, GW_OWNER);
+        if !owner.is_null() {
+            tray_icon(owner, NIM_MODIFY);
+        }
     }
 }
 
@@ -1511,7 +1567,7 @@ unsafe extern "system" fn options_proc(hwnd: HWND, message: u32, w: WPARAM, l: L
                 for (id, text, style, x, y, width, height) in [
                     (
                         3,
-                        w!("&Automatically start with Windows"),
+                        "&Automatically start with Windows",
                         BS_AUTOCHECKBOX,
                         20,
                         22,
@@ -1520,7 +1576,7 @@ unsafe extern "system" fn options_proc(hwnd: HWND, message: u32, w: WPARAM, l: L
                     ),
                     (
                         7,
-                        w!("&Ignore middle mouse button"),
+                        "&Ignore middle mouse button",
                         BS_AUTOCHECKBOX,
                         20,
                         58,
@@ -1529,20 +1585,20 @@ unsafe extern "system" fn options_proc(hwnd: HWND, message: u32, w: WPARAM, l: L
                     ),
                     (
                         10,
-                        w!("As &icon"),
+                        "As &icon",
                         BS_AUTORADIOBUTTON | WS_GROUP as i32,
                         40,
                         272,
                         120,
                         24,
                     ),
-                    (11, w!("As &menu"), BS_AUTORADIOBUTTON, 180, 272, 120, 24),
+                    (11, "As &menu", BS_AUTORADIOBUTTON, 180, 272, 120, 24),
                     (
                         2,
-                        w!("Close"),
+                        "Close",
                         BS_DEFPUSHBUTTON | WS_GROUP as i32,
                         236,
-                        328,
+                        382,
                         80,
                         28,
                     ),
@@ -1550,7 +1606,7 @@ unsafe extern "system" fn options_proc(hwnd: HWND, message: u32, w: WPARAM, l: L
                     let control = CreateWindowExW(
                         0,
                         w!("BUTTON"),
-                        text,
+                        wide_text(text).as_ptr(),
                         WS_CHILD | WS_VISIBLE | WS_TABSTOP | style as u32,
                         scale(x),
                         scale(y),
@@ -1582,7 +1638,7 @@ unsafe extern "system" fn options_proc(hwnd: HWND, message: u32, w: WPARAM, l: L
                     (
                         9,
                         w!("BUTTON"),
-                        w!("Minimize to tray"),
+                        "Minimize to tray",
                         BS_GROUPBOX as u32,
                         248,
                         64,
@@ -1590,7 +1646,7 @@ unsafe extern "system" fn options_proc(hwnd: HWND, message: u32, w: WPARAM, l: L
                     (
                         5,
                         w!("BUTTON"),
-                        w!("&Transparency"),
+                        "&Transparency",
                         BS_GROUPBOX as u32,
                         98,
                         142,
@@ -1598,16 +1654,16 @@ unsafe extern "system" fn options_proc(hwnd: HWND, message: u32, w: WPARAM, l: L
                     (
                         4,
                         TRACKBAR_CLASSW,
-                        w!("Transparency"),
+                        "Transparency",
                         WS_TABSTOP | TBS_AUTOTICKS,
                         124,
                         36,
                     ),
-                    (8, w!("STATIC"), w!(""), 0, 164, 20),
+                    (8, w!("STATIC"), "", 0, 164, 20),
                     (
                         6,
                         w!("STATIC"),
-                        w!("Invisible windows: choose Exit in the tray to restore."),
+                        "Invisible windows: choose Exit in the tray to restore.",
                         0,
                         190,
                         40,
@@ -1616,7 +1672,7 @@ unsafe extern "system" fn options_proc(hwnd: HWND, message: u32, w: WPARAM, l: L
                     let control = CreateWindowExW(
                         0,
                         class,
-                        text,
+                        wide_text(text).as_ptr(),
                         WS_CHILD | WS_VISIBLE | style,
                         scale(if matches!(id, 4 | 6 | 8) { 30 } else { 20 }),
                         scale(y),
@@ -1637,6 +1693,54 @@ unsafe extern "system" fn options_proc(hwnd: HWND, message: u32, w: WPARAM, l: L
                         1,
                     );
                 }
+                for (id, class, label, style, x, width, height) in [
+                    (12, w!("STATIC"), "&Language", 0, 20, 95, 24),
+                    (
+                        13,
+                        w!("COMBOBOX"),
+                        "",
+                        WS_TABSTOP | WS_GROUP | CBS_DROPDOWNLIST as u32 | WS_VSCROLL,
+                        120,
+                        196,
+                        150,
+                    ),
+                ] {
+                    let control = CreateWindowExW(
+                        0,
+                        class,
+                        wide_text(label).as_ptr(),
+                        WS_CHILD | WS_VISIBLE | style,
+                        scale(x),
+                        scale(330),
+                        scale(width),
+                        scale(height),
+                        hwnd,
+                        id as HMENU,
+                        GetModuleHandleW(null_mut()),
+                        null_mut(),
+                    );
+                    if control.is_null() {
+                        return -1;
+                    }
+                    SendMessageW(
+                        control,
+                        WM_SETFONT,
+                        GetStockObject(DEFAULT_GUI_FONT) as usize,
+                        1,
+                    );
+                }
+                populate_languages(GetDlgItem(hwnd, 13));
+                for (id, after) in [(12, 11), (13, 12), (2, 13)] {
+                    SetWindowPos(
+                        GetDlgItem(hwnd, id),
+                        GetDlgItem(hwnd, after),
+                        0,
+                        0,
+                        0,
+                        0,
+                        SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE,
+                    );
+                }
                 let slider = GetDlgItem(hwnd, 4);
                 SendMessageW(slider, TBM_SETRANGE, 1, 10 << 16);
                 SendMessageW(slider, TBM_SETPAGESIZE, 0, 1);
@@ -1646,7 +1750,7 @@ unsafe extern "system" fn options_proc(hwnd: HWND, message: u32, w: WPARAM, l: L
                     1,
                     (TRANSPARENCY.load(Ordering::Relaxed) / 10) as isize,
                 );
-                // Keep keyboard order checkboxes, labelled slider, Close.
+                // Keep keyboard order checkboxes, slider, radio group, language, Close.
                 SetWindowPos(
                     GetDlgItem(hwnd, 5),
                     GetDlgItem(hwnd, 7),
@@ -1694,6 +1798,23 @@ unsafe extern "system" fn options_proc(hwnd: HWND, message: u32, w: WPARAM, l: L
                     0,
                 );
                 SetFocus(checkbox);
+                return 0;
+            }
+            WM_COMMAND if w & 0xffff == 13 && (w >> 16) == CBN_SELCHANGE as usize => {
+                let combo = GetDlgItem(hwnd, 13);
+                let selected = SendMessageW(combo, CB_GETCURSEL, 0, 0);
+                if let Some((id, _)) = usize::try_from(selected)
+                    .ok()
+                    .and_then(|index| localization::choices().nth(index))
+                {
+                    match crate::transparency_settings::save_language(id) {
+                        Ok(()) => apply_language(hwnd, id),
+                        Err(error) => {
+                            populate_languages(combo);
+                            options_error(hwnd, &error);
+                        }
+                    }
+                }
                 return 0;
             }
             WM_HSCROLL if l == GetDlgItem(hwnd, 4) as isize => {
@@ -1829,7 +1950,7 @@ fn show_auxiliary(owner: HWND, options: bool) {
             left: 0,
             top: 0,
             right: (if options { 340 } else { 320 }) * dpi as i32 / 96,
-            bottom: (if options { 376 } else { 186 }) * dpi as i32 / 96,
+            bottom: (if options { 430 } else { 186 }) * dpi as i32 / 96,
         };
         let style = WS_OVERLAPPED | WS_CAPTION | WS_SYSMENU;
         AdjustWindowRectExForDpi(&mut bounds, style, 0, WS_EX_DLGMODALFRAME, dpi);
@@ -1838,11 +1959,12 @@ fn show_auxiliary(owner: HWND, options: bool) {
         let hwnd = CreateWindowExW(
             WS_EX_DLGMODALFRAME,
             class.lpszClassName,
-            if options {
-                w!("WinRoll RS - Options")
+            wide_text(if options {
+                "WinRoll RS - Options"
             } else {
-                w!("About WinRoll RS")
-            },
+                "About WinRoll RS"
+            })
+            .as_ptr(),
             style,
             info.rcWork.left + (info.rcWork.right - info.rcWork.left - width) / 2,
             info.rcWork.top + (info.rcWork.bottom - info.rcWork.top - height) / 2,
@@ -1875,14 +1997,23 @@ fn append_minimized_menu(menu: HMENU, windows: &[(u32, String)]) -> HMENU {
             return submenu;
         }
         if windows.is_empty() {
-            AppendMenuW(submenu, MF_STRING | MF_GRAYED, 0, w!("(none)"));
+            AppendMenuW(
+                submenu,
+                MF_STRING | MF_GRAYED,
+                0,
+                wide_text("(none)").as_ptr(),
+            );
         }
         for (index, (_, title)) in windows.iter().enumerate() {
-            let label: Vec<u16> = title
-                .replace('&', "&&")
-                .encode_utf16()
-                .chain(Some(0))
-                .collect();
+            let label: Vec<u16> = (if title.is_empty() {
+                text("(untitled)")
+            } else {
+                title
+            })
+            .replace('&', "&&")
+            .encode_utf16()
+            .chain(Some(0))
+            .collect();
             AppendMenuW(
                 submenu,
                 MF_STRING,
@@ -1890,7 +2021,13 @@ fn append_minimized_menu(menu: HMENU, windows: &[(u32, String)]) -> HMENU {
                 label.as_ptr(),
             );
         }
-        if AppendMenuW(menu, MF_POPUP, submenu as usize, w!("&Minimized")) == 0 {
+        if AppendMenuW(
+            menu,
+            MF_POPUP,
+            submenu as usize,
+            wide_text("&Minimized").as_ptr(),
+        ) == 0
+        {
             DestroyMenu(submenu);
             return null_mut();
         }
@@ -1958,13 +2095,20 @@ unsafe extern "system" fn tray_proc(hwnd: HWND, message: u32, w: WPARAM, l: LPAR
                     menu,
                     flags,
                     if paused { ENABLE } else { PAUSE } as usize,
-                    w!("&Enable"),
+                    wide_text("&Enable").as_ptr(),
                 );
                 let affected = RECOVERY_WINDOWS.lock().unwrap();
                 if !affected.is_empty() {
                     AppendMenuW(menu, MF_SEPARATOR, 0, std::ptr::null());
-                    for name in affected.iter() {
-                        let label: Vec<u16> = format!("Recovery needed: {name}")
+                    for (name, pid, handle) in affected.iter() {
+                        let name = if name.is_empty() {
+                            text("(untitled)")
+                        } else {
+                            name
+                        };
+                        let name = format!("{name} (PID {pid}, HWND {handle:#x})");
+                        let label: Vec<u16> = text("Recovery needed: {name}")
+                            .replace("{name}", &name)
                             .encode_utf16()
                             .chain(Some(0))
                             .collect();
@@ -1977,16 +2121,27 @@ unsafe extern "system" fn tray_proc(hwnd: HWND, message: u32, w: WPARAM, l: LPAR
                     menu,
                     MF_STRING,
                     UNROLL_ALL as usize,
-                    if retry {
-                        w!("&Retry unroll all")
+                    wide_text(if retry {
+                        "&Retry unroll all"
                     } else {
-                        w!("&Unroll all")
-                    },
+                        "&Unroll all"
+                    })
+                    .as_ptr(),
                 );
                 AppendMenuW(menu, MF_SEPARATOR, 0, std::ptr::null());
-                AppendMenuW(menu, MF_STRING, SETTINGS as usize, w!("&Options..."));
-                AppendMenuW(menu, MF_STRING, ABOUT as usize, w!("&About..."));
-                AppendMenuW(menu, MF_STRING, EXIT as usize, w!("E&xit"));
+                AppendMenuW(
+                    menu,
+                    MF_STRING,
+                    SETTINGS as usize,
+                    wide_text("&Options...").as_ptr(),
+                );
+                AppendMenuW(
+                    menu,
+                    MF_STRING,
+                    ABOUT as usize,
+                    wide_text("&About...").as_ptr(),
+                );
+                AppendMenuW(menu, MF_STRING, EXIT as usize, wide_text("E&xit").as_ptr());
                 // Version 4 supplies the icon anchor for keyboard as well as mouse activation.
                 let x = w as i16 as i32;
                 let y = (w >> 16) as i16 as i32;
@@ -2032,7 +2187,7 @@ unsafe extern "system" fn tray_proc(hwnd: HWND, message: u32, w: WPARAM, l: LPAR
 pub fn report_error(error: &str) {
     log(error);
     if std::env::args().len() == 1 {
-        let text: Vec<u16> = error.encode_utf16().chain(Some(0)).collect();
+        let text = wide_text(error);
         unsafe {
             MessageBoxW(
                 null_mut(),
@@ -2045,6 +2200,12 @@ pub fn report_error(error: &str) {
 }
 
 pub fn run() -> Result<(), String> {
+    localization::set_preference(0);
+    if std::env::args().len() == 1 {
+        localization::set_preference(
+            crate::transparency_settings::load_language().map_err(|error| error.to_string())?,
+        );
+    }
     unsafe {
         if std::env::args().len() > 1 {
             AttachConsole(ATTACH_PARENT_PROCESS);
@@ -2705,7 +2866,7 @@ fn self_test(interactive: bool) -> Result<(), String> {
             return Err("Mixed Unroll all outcome lost recovery or failed to restore peer".into());
         }
         let affected = RECOVERY_WINDOWS.lock().unwrap().clone();
-        if affected.len() != 1 || !affected[0].contains("WinRoll RS native test fixture") {
+        if affected.len() != 1 || !affected[0].0.contains("WinRoll RS native test fixture") {
             return Err("Recovery flow did not identify the failed window".into());
         }
         unsafe {
@@ -3202,8 +3363,12 @@ fn self_test_send_to_back(
     Ok(())
 }
 
+#[cfg(test)]
+static UI_TEST_LOCK: Mutex<()> = Mutex::new(());
+
 #[test]
 fn about_repository_hyperlink() {
+    let _guard = UI_TEST_LOCK.lock().unwrap();
     unsafe {
         show_auxiliary(null_mut(), false);
         let hwnd = ABOUT_WINDOW.load(Ordering::Relaxed) as HWND;
@@ -3248,12 +3413,16 @@ fn about_repository_hyperlink() {
 
 #[cfg_attr(test, test)]
 fn self_test_options() -> Result<(), String> {
+    #[cfg(test)]
+    let _guard = UI_TEST_LOCK.lock().unwrap();
     let original = MINIMIZE_AS_MENU.load(Ordering::Relaxed);
+    let original_language = localization::preference();
     let result = [false, true].into_iter().try_for_each(|as_menu| {
         MINIMIZE_AS_MENU.store(as_menu, Ordering::Relaxed);
         check_options_window()
     });
     MINIMIZE_AS_MENU.store(original, Ordering::Relaxed);
+    localization::set_preference(original_language);
     result
 }
 
@@ -3273,6 +3442,60 @@ fn check_options_window() -> Result<(), String> {
             let ignore_middle = GetDlgItem(hwnd, 7);
             let as_icon = GetDlgItem(hwnd, 10);
             let as_menu = GetDlgItem(hwnd, 11);
+            let language = GetDlgItem(hwnd, 13);
+            let choice_count = localization::choices().count() as isize;
+            if language.is_null() || SendMessageW(language, CB_GETCOUNT, 0, 0) != choice_count {
+                return Err("Language dropdown does not contain all registered choices".into());
+            }
+            show_auxiliary(null_mut(), false);
+            let about = ABOUT_WINDOW.load(Ordering::Relaxed) as HWND;
+            for (index, (preference, _)) in localization::choices().enumerate() {
+                SetFocus(language);
+                apply_language(hwnd, preference);
+                let mut title = [0u16; 128];
+                let length = GetWindowTextW(hwnd, title.as_mut_ptr(), title.len() as i32);
+                let mut about_title = [0u16; 128];
+                let about_length =
+                    GetWindowTextW(about, about_title.as_mut_ptr(), about_title.len() as i32);
+                if String::from_utf16_lossy(&title[..length as usize])
+                    != text("WinRoll RS - Options")
+                    || String::from_utf16_lossy(&about_title[..about_length as usize])
+                        != text("About WinRoll RS")
+                    || SendMessageW(language, CB_GETCURSEL, 0, 0) != index as isize
+                    || SendMessageW(language, CB_GETCOUNT, 0, 0) != choice_count
+                    || windows_sys::Win32::UI::Input::KeyboardAndMouse::GetFocus() != language
+                {
+                    DestroyWindow(about);
+                    return Err(
+                        "Live language switch lost translated titles, selection or focus".into(),
+                    );
+                }
+                for (control, expected) in [
+                    (GetDlgItem(hwnd, 12), text("&Language")),
+                    (close, text("Close")),
+                    (GetDlgItem(about, 1), text("Close")),
+                ] {
+                    let length = GetWindowTextW(control, title.as_mut_ptr(), title.len() as i32);
+                    if String::from_utf16_lossy(&title[..length as usize]) != expected {
+                        DestroyWindow(about);
+                        return Err("Language switch did not translate existing controls".into());
+                    }
+                }
+                for (index, (_, expected)) in localization::choices().enumerate() {
+                    let length = SendMessageW(language, CB_GETLBTEXTLEN, index, 0);
+                    let mut item = vec![0u16; length.max(0) as usize + 1];
+                    if length < 0
+                        || SendMessageW(language, CB_GETLBTEXT, index, item.as_mut_ptr() as isize)
+                            != length
+                        || String::from_utf16_lossy(&item[..length as usize]) != expected
+                    {
+                        DestroyWindow(about);
+                        return Err("Language dropdown lost native language names".into());
+                    }
+                }
+            }
+            DestroyWindow(about);
+            SetFocus(checkbox);
             let menu_preference = MINIMIZE_AS_MENU.load(Ordering::Relaxed);
             if as_icon.is_null()
                 || as_menu.is_null()
@@ -3341,6 +3564,15 @@ fn check_options_window() -> Result<(), String> {
             }
             let tab = MSG { hwnd: radio, ..tab };
             if IsDialogMessageW(hwnd, &tab) == 0
+                || windows_sys::Win32::UI::Input::KeyboardAndMouse::GetFocus() != language
+            {
+                return Err("Options keyboard navigation did not focus language".into());
+            }
+            let tab = MSG {
+                hwnd: language,
+                ..tab
+            };
+            if IsDialogMessageW(hwnd, &tab) == 0
                 || windows_sys::Win32::UI::Input::KeyboardAndMouse::GetFocus() != close
             {
                 return Err("Options keyboard navigation did not focus Close".into());
@@ -3356,7 +3588,9 @@ fn check_options_window() -> Result<(), String> {
         }
         result?;
     }
-    log("PASS Options startup preference, window reuse, keyboard navigation and Close");
+    log(
+        "PASS Options preferences, registered language choices, live Options/About translation, focus, keyboard navigation and Close",
+    );
     Ok(())
 }
 

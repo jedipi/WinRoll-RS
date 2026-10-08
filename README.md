@@ -128,6 +128,17 @@ The **Minimize to tray** group offers **As icon** and **As menu**. The choice is
 saved for the next run and applies to windows minimized afterward. Windows already
 hidden keep their existing icon or menu entry until restored.
 
+The **Language** dropdown offers **System default**, **English**, **简体中文**
+(Simplified Chinese), and **繁體中文** (Traditional Chinese). System default follows
+your Windows display language, falling back to English when unsupported. Changes
+apply immediately throughout the application, including open Options and About
+windows, and are saved for the next run. Chinese translations are initial drafts
+awaiting language review. Diagnostics, the installer and documentation remain in
+English; Windows-provided error details retain their original language.
+
+To add or improve a language, see [Contributing translations](src/localization/README.md).
+Each language has its own source file and is compiled into the executable.
+
 ## Planned features
 
 ### Minimize to Tray

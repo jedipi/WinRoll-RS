@@ -1,3 +1,4 @@
+use crate::localization::normalize_preference;
 use std::{io, ptr::null_mut};
 use windows_sys::Win32::{Foundation::*, System::Registry::*};
 
@@ -9,6 +10,18 @@ pub fn load() -> io::Result<u32> {
 
 pub fn save(percent: u32) -> io::Result<()> {
     save_to(SETTINGS_KEY, percent)
+}
+
+pub fn load_language() -> io::Result<u32> {
+    load_language_from(SETTINGS_KEY)
+}
+
+pub fn save_language(language: u32) -> io::Result<()> {
+    save_dword(SETTINGS_KEY, "Language", normalize_preference(language))
+}
+
+fn load_language_from(key: &str) -> io::Result<u32> {
+    Ok(normalize_preference(load_dword(key, "Language", 0)?))
 }
 
 pub fn load_ignore_middle() -> io::Result<bool> {
@@ -145,6 +158,14 @@ fn transparency_setting_round_trip() {
     let wide_key: Vec<u16> = key.encode_utf16().chain(Some(0)).collect();
     let result = (|| -> io::Result<()> {
         assert_eq!(load_from(&key)?, 50);
+        assert_eq!(load_language_from(&key)?, 0);
+        for (language, _) in crate::localization::choices() {
+            save_dword(&key, "Language", language)?;
+            assert_eq!(load_language_from(&key)?, language);
+        }
+        save_dword(&key, "Language", u32::MAX)?;
+        assert_eq!(load_language_from(&key)?, 1);
+        assert_eq!(normalize_preference(u32::MAX), 1);
         assert!(!load_minimize_as_menu_from(&key)?);
         for as_menu in [true, false] {
             save_dword(&key, "MinimizeAsMenu", u32::from(as_menu))?;

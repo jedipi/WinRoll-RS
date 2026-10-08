@@ -1,0 +1,102 @@
+use super::Language;
+
+pub(super) const LANGUAGE: Language = Language {
+    id: 3,
+    name: "繁體中文",
+    windows_ids: &[0x0404, 0x0c04, 0x1404, 0x7c04],
+    messages: &[
+        ("Close", "關閉"),
+        ("Version {version}", "版本 {version}"),
+        ("Created by Kin Tam", "作者：Kin Tam"),
+        ("About WinRoll RS", "關於 WinRoll RS"),
+        ("WinRoll RS - Options", "WinRoll RS - 選項"),
+        ("WinRoll RS Options", "WinRoll RS 選項"),
+        (
+            "&Automatically start with Windows",
+            "隨 Windows 自動啟動(&A)",
+        ),
+        ("&Ignore middle mouse button", "忽略滑鼠中鍵(&I)"),
+        ("As &icon", "顯示為圖示(&I)"),
+        ("As &menu", "顯示為選單項目(&M)"),
+        ("Minimize to tray", "最小化至通知區域"),
+        ("&Transparency", "透明度(&T)"),
+        ("Transparency", "透明度"),
+        (
+            "{percent}% (0% opaque, 100% invisible)",
+            "{percent}%（0% 不透明，100% 不可見）",
+        ),
+        (
+            "Invisible windows: choose Exit in the tray to restore.",
+            "視窗不可見時，請在通知區域選單中選擇「結束」以還原。",
+        ),
+        ("&Language", "語言(&L)"),
+        ("System default", "跟隨系統"),
+        ("(none)", "（無）"),
+        ("(untitled)", "（無標題）"),
+        ("&Minimized", "已最小化(&M)"),
+        ("&Enable", "啟用(&E)"),
+        ("&Retry unroll all", "重試展開所有視窗(&R)"),
+        ("&Unroll all", "展開所有視窗(&U)"),
+        ("&Options...", "選項(&O)..."),
+        ("&About...", "關於(&A)..."),
+        ("E&xit", "結束(&X)"),
+        ("Recovery needed: {name}", "需要還原：{name}"),
+        (
+            "WinRoll RS - unroll pending; retry Unroll all or Exit",
+            "WinRoll RS - 等待展開；請重試「展開所有視窗」或「結束」",
+        ),
+        ("WinRoll RS - paused", "WinRoll RS - 已暫停"),
+        ("WinRoll RS - enabled", "WinRoll RS - 已啟用"),
+        (
+            "Cannot access the Windows setting.\n\n{error}",
+            "無法存取 Windows 設定。\n\n{error}",
+        ),
+        (
+            "Cannot read own integrity level",
+            "無法讀取程式的完整性層級",
+        ),
+        (
+            "Run WinRoll RS without administrator privileges",
+            "請勿以系統管理員身分執行 WinRoll RS",
+        ),
+        (
+            "Cannot enable per-monitor DPI awareness",
+            "無法啟用每個螢幕的 DPI 感知",
+        ),
+        (
+            "Cannot create WinRoll RS mutex",
+            "無法建立 WinRoll RS 互斥鎖",
+        ),
+        (
+            "Another WinRoll RS controller is already running",
+            "另一個 WinRoll RS 執行個體正在執行",
+        ),
+        ("Already initialized", "已初始化"),
+        (
+            "Cannot create the WinRoll RS tray icon",
+            "無法建立 WinRoll RS 通知區域圖示",
+        ),
+        ("Cannot install mouse hook", "無法安裝滑鼠攔截程序"),
+        ("Window worker panicked", "視窗工作執行緒異常終止"),
+        (
+            "Saved minimize as menu setting must be 0 or 1.",
+            "儲存的最小化選單設定必須為 0 或 1。",
+        ),
+        (
+            "Saved ignore middle mouse button setting must be 0 or 1.",
+            "儲存的忽略滑鼠中鍵設定必須為 0 或 1。",
+        ),
+        (
+            "Saved transparency must be between 0 and 100 in steps of 10.",
+            "儲存的透明度必須介於 0 到 100，且為 10 的倍數。",
+        ),
+        (
+            "Transparency must be between 0 and 100 in steps of 10.",
+            "透明度必須介於 0 到 100，且為 10 的倍數。",
+        ),
+        (
+            "The executable path is too long for Windows startup. Move WinRoll RS to a shorter path.",
+            "程式路徑太長，無法隨 Windows 啟動。請將 WinRoll RS 移至較短的路徑。",
+        ),
+    ],
+};

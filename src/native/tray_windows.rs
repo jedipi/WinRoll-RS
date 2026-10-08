@@ -67,11 +67,8 @@ impl Manager {
                         title.len() as i32,
                     )
                 };
-                let title = if length > 0 {
-                    String::from_utf16_lossy(&title[..length as usize])
-                } else {
-                    "(untitled)".into()
-                };
+                // Keep titles untranslated; the UI supplies its current-language fallback.
+                let title = String::from_utf16_lossy(&title[..length as usize]);
                 (*id, title)
             })
             .collect::<Vec<_>>();
@@ -420,7 +417,7 @@ pub(super) fn self_test() -> Result<(), String> {
         }
         unsafe { SetWindowTextW(hwnd, w!("")) };
         manager.publish_hidden_menu();
-        if *MINIMIZED_WINDOWS.lock().unwrap() != [(menu_id, "(untitled)".into())] {
+        if *MINIMIZED_WINDOWS.lock().unwrap() != [(menu_id, String::new())] {
             return Err("Minimized menu omitted the untitled-window fallback".into());
         }
         manager.recreate_hidden_icons();
