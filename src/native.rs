@@ -77,6 +77,8 @@ static FIXTURE_MIN_TRACK: AtomicBool = AtomicBool::new(false);
 static FIXTURE_CAPTION_EVERYWHERE: AtomicBool = AtomicBool::new(false);
 static FIXTURE_REFUSES_SHOW: AtomicIsize = AtomicIsize::new(0);
 static FIXTURE_DELAYS_HIDE: AtomicIsize = AtomicIsize::new(0);
+static FIXTURE_REFUSES_HIDE: AtomicIsize = AtomicIsize::new(0);
+static FIXTURE_DELAYS_STYLE: AtomicIsize = AtomicIsize::new(0);
 
 #[derive(Clone, Copy)]
 struct Target {
@@ -128,7 +130,6 @@ struct Manager {
     integrity: u32,
 }
 
-#[derive(Clone, Copy)]
 struct Transparent {
     target: Target,
     marker: usize,
@@ -136,6 +137,8 @@ struct Transparent {
     color: u32,
     alpha: u8,
     flags: u32,
+    pending: Option<thread::JoinHandle<bool>>,
+    restoring: bool,
 }
 
 fn log(message: impl std::fmt::Display) {
@@ -507,7 +510,7 @@ impl Manager {
         }
     }
 
-    fn owns_transparency(&self, saved: Transparent) -> bool {
+    fn owns_transparency(&self, saved: &Transparent) -> bool {
         same_target(saved.target)
             && unsafe {
                 GetPropW(
@@ -518,36 +521,137 @@ impl Manager {
             }
     }
 
-    fn restore_transparency(&mut self, key: isize) {
-        let Some(saved) = self.transparent.get(&key).copied() else {
-            return;
-        };
-        if !self.owns_transparency(saved) {
-            self.transparent.remove(&key);
-            return;
-        }
-        // Preserve unrelated extended styles and the target's original layered attributes.
-        unsafe {
-            let hwnd = key as HWND;
-            let restored = if saved.layered {
-                SetLayeredWindowAttributes(hwnd, saved.color, saved.alpha, saved.flags) != 0
+    fn start_transparency_change(&mut self, key: isize, percent: Option<u32>) -> bool {
+        let saved = &self.transparent[&key];
+        let (target, marker, layered, color, alpha, flags) = (
+            saved.target,
+            saved.marker,
+            saved.layered,
+            saved.color,
+            saved.alpha,
+            saved.flags,
+        );
+        let property = self.transparency_property.clone();
+        // SetWindowLongW synchronously calls the target's window procedure. Keep at most
+        // one operation per target off the manager, and never restore ahead of an apply.
+        let Ok(pending) = thread::Builder::new().spawn(move || unsafe {
+            let hwnd = target.hwnd as HWND;
+            let owns =
+                || same_target(target) && GetPropW(hwnd, property.as_ptr()) as usize == marker;
+            if !owns() {
+                return false;
+            }
+            let style = GetWindowLongW(hwnd, GWL_EXSTYLE) as u32;
+            let wanted = if percent.is_some() || layered {
+                style | WS_EX_LAYERED
             } else {
-                let style = GetWindowLongW(hwnd, GWL_EXSTYLE) as u32;
-                SetLastError(0);
-                SetWindowLongW(hwnd, GWL_EXSTYLE, (style & !WS_EX_LAYERED) as i32);
-                GetLastError() == 0 && GetWindowLongW(hwnd, GWL_EXSTYLE) as u32 & WS_EX_LAYERED == 0
+                style & !WS_EX_LAYERED
             };
-            if restored {
-                RemovePropW(hwnd, self.transparency_property.as_ptr());
-                self.transparent.remove(&key);
-                RedrawWindow(
+            if style != wanted {
+                SetLastError(0);
+                SetWindowLongW(hwnd, GWL_EXSTYLE, wanted as i32);
+                if GetLastError() != 0 || !owns() {
+                    return false;
+                }
+            }
+            if let Some(percent) = percent {
+                SetLayeredWindowAttributes(
                     hwnd,
+                    color,
+                    transparency_alpha(percent),
+                    flags | LWA_ALPHA,
+                ) != 0
+                    && owns()
+            } else if layered {
+                SetLayeredWindowAttributes(hwnd, color, alpha, flags) != 0 && owns()
+            } else {
+                GetWindowLongW(hwnd, GWL_EXSTYLE) as u32 & WS_EX_LAYERED == 0 && owns()
+            }
+        }) else {
+            return false;
+        };
+        let saved = self.transparent.get_mut(&key).unwrap();
+        saved.pending = Some(pending);
+        saved.restoring = percent.is_none();
+        true
+    }
+
+    fn finish_transparency_change(&mut self, key: isize) -> Option<bool> {
+        let deadline = Instant::now() + Duration::from_millis(350);
+        let saved = self.transparent.get_mut(&key)?;
+        while !saved.pending.as_ref()?.is_finished() {
+            if Instant::now() >= deadline {
+                return None;
+            }
+            thread::sleep(Duration::from_millis(10));
+        }
+        Some(saved.pending.take()?.join().unwrap_or(false))
+    }
+
+    fn forget_transparency(&mut self, key: isize) {
+        if let Some(saved) = self.transparent.remove(&key)
+            && self.owns_transparency(&saved)
+        {
+            unsafe {
+                RemovePropW(key as HWND, self.transparency_property.as_ptr());
+                RedrawWindow(
+                    key as HWND,
                     std::ptr::null(),
                     null_mut(),
                     RDW_INVALIDATE | RDW_FRAME | RDW_ALLCHILDREN,
                 );
             }
         }
+    }
+
+    fn restore_transparency(&mut self, key: isize) {
+        let Some(saved) = self.transparent.get(&key) else {
+            return;
+        };
+        if !self.owns_transparency(saved) {
+            self.transparent.remove(&key);
+            return;
+        }
+        if saved.pending.is_some() {
+            let restoring = saved.restoring;
+            let Some(success) = self.finish_transparency_change(key) else {
+                return;
+            };
+            if restoring {
+                if success {
+                    self.forget_transparency(key);
+                }
+                return;
+            }
+        }
+        if self.start_transparency_change(key, None)
+            && self.finish_transparency_change(key) == Some(true)
+        {
+            self.forget_transparency(key);
+        }
+    }
+
+    fn poll_transparency(&mut self) -> bool {
+        let ready: Vec<_> = self
+            .transparent
+            .iter()
+            .filter(|(_, saved)| {
+                saved
+                    .pending
+                    .as_ref()
+                    .is_some_and(|pending| pending.is_finished())
+            })
+            .map(|(key, _)| *key)
+            .collect();
+        let before = self.transparent.len();
+        for key in ready {
+            if self.transparent[&key].restoring
+                || self.finish_transparency_change(key) == Some(false)
+            {
+                self.restore_transparency(key);
+            }
+        }
+        self.transparent.len() != before
     }
 
     fn restore_all_transparency(&mut self) {
@@ -565,7 +669,7 @@ impl Manager {
         {
             return;
         }
-        if let Some(saved) = self.transparent.get(&target.hwnd).copied() {
+        if let Some(saved) = self.transparent.get(&target.hwnd) {
             let owned = self.owns_transparency(saved);
             self.restore_transparency(target.hwnd);
             if owned {
@@ -586,6 +690,8 @@ impl Manager {
                 color: 0,
                 alpha: 255,
                 flags: 0,
+                pending: None,
+                restoring: false,
             };
             // Per-pixel layered windows cannot be safely restored with this API.
             if saved.layered
@@ -608,15 +714,8 @@ impl Manager {
                 return;
             }
             self.transparent.insert(target.hwnd, saved);
-            SetLastError(0);
-            SetWindowLongW(hwnd, GWL_EXSTYLE, (style | WS_EX_LAYERED) as i32);
-            if GetLastError() != 0
-                || SetLayeredWindowAttributes(
-                    hwnd,
-                    saved.color,
-                    transparency_alpha(percent),
-                    saved.flags | LWA_ALPHA,
-                ) == 0
+            if !self.start_transparency_change(target.hwnd, Some(percent))
+                || self.finish_transparency_change(target.hwnd) == Some(false)
             {
                 self.restore_transparency(target.hwnd);
             }
@@ -2073,7 +2172,7 @@ pub fn run() -> Result<(), String> {
                 .filter(|(_, saved)| !manager.owns(saved))
                 .map(|(key, _)| *key)
                 .collect();
-            let mut changed = hidden_changed || !closed.is_empty();
+            let mut changed = manager.poll_transparency() || hidden_changed || !closed.is_empty();
             for key in closed {
                 manager.windows.remove(&key);
             }
@@ -2090,7 +2189,7 @@ pub fn run() -> Result<(), String> {
             let stale: Vec<_> = manager
                 .transparent
                 .iter()
-                .filter(|(_, saved)| !manager.owns_transparency(**saved))
+                .filter(|(_, saved)| !manager.owns_transparency(saved))
                 .map(|(key, _)| *key)
                 .collect();
             changed |= !stale.is_empty();
@@ -2397,7 +2496,7 @@ fn self_test(interactive: bool) -> Result<(), String> {
             return Err("Close and caption gestures did not reject other hit regions".into());
         }
         self_test_topmost_exit(close_point)?;
-        self_test_transparency(point)?;
+        self_test_transparency(point, second_hwnd)?;
         self_test_topmost(&mut manager, close_point, false)?;
         self_test_topmost(&mut manager, close_point, true)?;
         self_test_send_to_back(&manager, close_point, second_hwnd, false)?;
@@ -2811,12 +2910,19 @@ fn self_test(interactive: bool) -> Result<(), String> {
     self_test_menu_exit()
 }
 
-fn self_test_transparency(point: POINT) -> Result<(), String> {
+fn self_test_transparency(point: POINT, other_hwnd: HWND) -> Result<(), String> {
     let mut manager = Manager::new()?;
     let target = manager
         .probe(point)
         .ok_or("Transparency fixture caption not found")?;
     let hwnd = target.hwnd as HWND;
+    let mut other_pid = 0;
+    let other = Target {
+        hwnd: other_hwnd as isize,
+        tid: unsafe { GetWindowThreadProcessId(other_hwnd, &mut other_pid) },
+        pid: other_pid,
+        rect: rect(other_hwnd).ok_or("Second transparency fixture unavailable")?,
+    };
     let original_percent = TRANSPARENCY.load(Ordering::Relaxed);
     let result = (|| -> Result<(), String> {
         for percent in (0..=100).step_by(10) {
@@ -2840,6 +2946,48 @@ fn self_test_transparency(point: POINT) -> Result<(), String> {
                 || unsafe { GetWindowLongW(hwnd, GWL_EXSTYLE) } as u32 & WS_EX_LAYERED != 0
             {
                 return Err("Transparency toggle did not restore non-layered style".into());
+            }
+        }
+        // A target blocked in WM_STYLECHANGING must not hold the manager worker.
+        TRANSPARENCY.store(50, Ordering::Relaxed);
+        for restoring in [false, true] {
+            manager.toggle_transparency(other);
+            if !manager.transparent.contains_key(&other.hwnd) {
+                return Err("Second fixture was not made transparent".into());
+            }
+            if restoring {
+                manager.toggle_transparency(target);
+            }
+            FIXTURE_DELAYS_STYLE.store(target.hwnd, Ordering::Relaxed);
+            let started = Instant::now();
+            if restoring {
+                manager.restore_all_transparency();
+            } else {
+                manager.toggle_transparency(target);
+                manager.restore_transparency(other.hwnd);
+            }
+            if started.elapsed() > Duration::from_millis(700) {
+                return Err(format!(
+                    "Transparency restoring={restoring} blocked the manager"
+                ));
+            }
+            if !manager.transparent.contains_key(&target.hwnd)
+                || manager.transparent.contains_key(&other.hwnd)
+                || unsafe { GetWindowLongW(other_hwnd, GWL_EXSTYLE) } as u32 & WS_EX_LAYERED != 0
+            {
+                return Err(
+                    "Stalled transparency lost recovery state or blocked another window".into(),
+                );
+            }
+            // Let the outstanding call finish before verifying a recovery retry.
+            thread::sleep(Duration::from_millis(1300));
+            manager.restore_all_transparency();
+            if !manager.transparent.is_empty()
+                || unsafe { GetWindowLongW(hwnd, GWL_EXSTYLE) } as u32 & WS_EX_LAYERED != 0
+            {
+                return Err(
+                    "Transparency retry did not restore after a stalled style change".into(),
+                );
             }
         }
         // Preserve a pre-existing alpha and color key, including on Exit.
@@ -2873,6 +3021,7 @@ fn self_test_transparency(point: POINT) -> Result<(), String> {
         }
         Ok(())
     })();
+    FIXTURE_DELAYS_STYLE.store(0, Ordering::Relaxed);
     manager.restore_all_transparency();
     unsafe {
         let style = GetWindowLongW(hwnd, GWL_EXSTYLE) as u32;
@@ -2881,7 +3030,9 @@ fn self_test_transparency(point: POINT) -> Result<(), String> {
     TRANSPARENCY.store(original_percent, Ordering::Relaxed);
     STOPPING.store(false, Ordering::Relaxed);
     result?;
-    log("PASS transparency 0–100%, toggle, Pause and original layered attributes on Exit");
+    log(
+        "PASS transparency 0–100%, toggle, stalled apply/restore with independent recovery, Pause and original layered attributes on Exit",
+    );
     Ok(())
 }
 
@@ -3467,6 +3618,13 @@ fn self_test_dpi_move(manager: &mut Manager, key: isize, point: POINT) -> Result
 unsafe extern "system" fn fixture_proc(hwnd: HWND, message: u32, w: WPARAM, l: LPARAM) -> LRESULT {
     // SAFETY: invoked by Windows only for this process-owned fixture.
     unsafe {
+        if message == WM_STYLECHANGING
+            && FIXTURE_DELAYS_STYLE
+                .compare_exchange(hwnd as isize, 0, Ordering::Relaxed, Ordering::Relaxed)
+                .is_ok()
+        {
+            thread::sleep(Duration::from_millis(1200));
+        }
         if message == WM_DPICHANGED {
             let suggested = *(l as *const RECT);
             SetWindowPos(
@@ -3500,6 +3658,9 @@ unsafe extern "system" fn fixture_proc(hwnd: HWND, message: u32, w: WPARAM, l: L
         }
         if message == WM_WINDOWPOSCHANGING {
             let position = &mut *(l as *mut WINDOWPOS);
+            if FIXTURE_REFUSES_HIDE.load(Ordering::Relaxed) == hwnd as isize {
+                position.flags &= !SWP_HIDEWINDOW;
+            }
             if position.flags & SWP_HIDEWINDOW != 0
                 && FIXTURE_DELAYS_HIDE
                     .compare_exchange(hwnd as isize, 0, Ordering::Relaxed, Ordering::Relaxed)

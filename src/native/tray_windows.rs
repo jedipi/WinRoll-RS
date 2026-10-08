@@ -5,7 +5,8 @@ pub(super) struct Hidden {
     marker: usize,
     icon: isize,
     as_menu: bool,
-    hide_confirmed: bool,
+    operation: Option<thread::JoinHandle<()>>,
+    restoring: bool,
 }
 
 impl Manager {
@@ -146,7 +147,8 @@ impl Manager {
                     marker: id as usize,
                     icon: icon as isize,
                     as_menu,
-                    hide_confirmed: false,
+                    operation: None,
+                    restoring: false,
                 },
             );
             // Install the recovery path before hiding the target.
@@ -155,43 +157,71 @@ impl Manager {
                 self.forget_hidden(id);
                 return;
             }
-            if SetWindowPos(
-                hwnd,
-                null_mut(),
-                0,
-                0,
-                0,
-                0,
-                SWP_HIDEWINDOW
-                    | SWP_NOMOVE
-                    | SWP_NOSIZE
-                    | SWP_NOZORDER
-                    | SWP_NOACTIVATE
-                    | SWP_NOOWNERZORDER
-                    | SWP_ASYNCWINDOWPOS,
-            ) == 0
-            {
-                self.forget_hidden(id);
-                return;
-            }
         }
-        self.confirm_hidden(id);
+        if !self.start_hidden_operation(id, false) {
+            self.forget_hidden(id);
+            return;
+        }
+        self.wait_hidden_operation(id);
     }
 
-    fn confirm_hidden(&mut self, id: u32) -> bool {
+    fn start_hidden_operation(&mut self, id: u32, show: bool) -> bool {
+        let saved = &self.hidden[&id];
+        let target = saved.target;
+        let marker = saved.marker;
+        let property = self.hidden_property.clone();
+        // A synchronous call on its own thread gives an actual completion signal.
+        // Never queue a show until the preceding hide has finished, even if it was refused.
+        let operation = thread::Builder::new().spawn(move || unsafe {
+            let hwnd = target.hwnd as HWND;
+            if same_target(target) && GetPropW(hwnd, property.as_ptr()) as usize == marker {
+                SetWindowPos(
+                    hwnd,
+                    null_mut(),
+                    0,
+                    0,
+                    0,
+                    0,
+                    (if show { SWP_SHOWWINDOW } else { SWP_HIDEWINDOW })
+                        | SWP_NOMOVE
+                        | SWP_NOSIZE
+                        | SWP_NOZORDER
+                        | SWP_NOACTIVATE
+                        | SWP_NOOWNERZORDER,
+                );
+            }
+        });
+        let Ok(operation) = operation else {
+            return false;
+        };
+        let saved = self.hidden.get_mut(&id).unwrap();
+        saved.operation = Some(operation);
+        saved.restoring = show;
+        true
+    }
+
+    fn wait_hidden_operation(&mut self, id: u32) -> bool {
         let deadline = Instant::now() + Duration::from_millis(350);
         loop {
-            let saved = &self.hidden[&id];
+            let Some(saved) = self.hidden.get(&id) else {
+                return false;
+            };
             if !self.owns_hidden(saved) {
                 self.forget_hidden(id);
                 return false;
             }
-            if saved.hide_confirmed || unsafe { IsWindowVisible(saved.target.hwnd as HWND) } == 0 {
-                self.hidden.get_mut(&id).unwrap().hide_confirmed = true;
+            if saved
+                .operation
+                .as_ref()
+                .is_none_or(|operation| operation.is_finished())
+            {
+                if let Some(operation) = self.hidden.get_mut(&id).unwrap().operation.take() {
+                    let _ = operation.join();
+                }
                 return true;
             }
             if Instant::now() >= deadline {
-                // Keep the recovery entry and identity: the queued hide may execute later.
+                // Keep the operation and recovery entry until this target responds.
                 return false;
             }
             thread::sleep(Duration::from_millis(10));
@@ -199,57 +229,25 @@ impl Manager {
     }
 
     pub(super) fn restore_hidden(&mut self, id: u32, activate: bool) {
-        if !self.hidden.contains_key(&id) || !self.confirm_hidden(id) {
+        if !self.wait_hidden_operation(id) {
             return;
         }
-        let Some(saved) = self.hidden.get(&id) else {
-            return;
-        };
-        if !self.owns_hidden(saved) {
-            self.forget_hidden(id);
-            return;
-        }
-        let hwnd = saved.target.hwnd as HWND;
         // Showing without SW_RESTORE preserves maximized, snapped and rolled geometry.
-        unsafe {
-            if SetWindowPos(
-                hwnd,
-                null_mut(),
-                0,
-                0,
-                0,
-                0,
-                SWP_SHOWWINDOW
-                    | SWP_NOMOVE
-                    | SWP_NOSIZE
-                    | SWP_NOZORDER
-                    | SWP_NOACTIVATE
-                    | SWP_NOOWNERZORDER
-                    | SWP_ASYNCWINDOWPOS,
-            ) == 0
-            {
-                return;
-            }
+        if !self.hidden[&id].restoring
+            && (!self.start_hidden_operation(id, true) || !self.wait_hidden_operation(id))
+        {
+            return;
         }
-        let deadline = Instant::now() + Duration::from_millis(350);
-        let mut stable = 0;
-        loop {
-            if unsafe { IsWindowVisible(hwnd) } != 0 {
-                stable += 1;
-            } else {
-                stable = 0;
+        let saved = &self.hidden[&id];
+        let hwnd = saved.target.hwnd as HWND;
+        if !self.owns_hidden(saved) || unsafe { IsWindowVisible(hwnd) } != 0 {
+            if activate && self.owns_hidden(saved) {
+                unsafe { SetForegroundWindow(hwnd) };
             }
-            if !self.owns_hidden(saved) || stable == 5 {
-                if activate && self.owns_hidden(saved) {
-                    unsafe { SetForegroundWindow(hwnd) };
-                }
-                self.forget_hidden(id);
-                break;
-            }
-            if Instant::now() >= deadline {
-                break;
-            }
-            thread::sleep(Duration::from_millis(10));
+            self.forget_hidden(id);
+        } else {
+            // A completed show was refused; allow the next recovery attempt to retry.
+            self.hidden.get_mut(&id).unwrap().restoring = false;
         }
     }
 
@@ -444,6 +442,16 @@ pub(super) fn self_test() -> Result<(), String> {
         {
             return Err("Menu restoration retained its entry or changed geometry".into());
         }
+        FIXTURE_REFUSES_HIDE.store(key, Ordering::Relaxed);
+        manager.minimize_to_tray(target, true);
+        if unsafe { IsWindowVisible(hwnd) } == 0 || manager.hidden.is_empty() {
+            return Err("Refused hide did not retain a visible recovery entry".into());
+        }
+        if !manager.control(EXIT) || !manager.hidden.is_empty() {
+            return Err("Refused hide prevented Exit despite a visible window".into());
+        }
+        FIXTURE_REFUSES_HIDE.store(0, Ordering::Relaxed);
+        STOPPING.store(false, Ordering::Relaxed);
         manager.control(ENABLE);
         manager.toggle(target);
         let rolled = rect(hwnd).ok_or("Missing rolled bounds")?;
@@ -526,6 +534,7 @@ pub(super) fn self_test() -> Result<(), String> {
         }
         Ok(())
     })();
+    FIXTURE_REFUSES_HIDE.store(0, Ordering::Relaxed);
     FIXTURE_REFUSES_SHOW.store(0, Ordering::Relaxed);
     FIXTURE_DELAYS_HIDE.store(0, Ordering::Relaxed);
     manager.restore_all_hidden();
@@ -539,7 +548,7 @@ pub(super) fn self_test() -> Result<(), String> {
     RECOVERY_PENDING.store(false, Ordering::Relaxed);
     result?;
     log(
-        "PASS Minimize hit-test, tray icon/menu hide/restore, live menu titles, Pause, Unroll all, icon recreation, rolled/maximized geometry, Exit and closed-window cleanup",
+        "PASS Minimize hit-test, tray icon/menu hide/restore, live menu titles, Pause, Unroll all, icon recreation, rolled/maximized geometry, refused hide, delayed hide/refused show recovery, Exit and closed-window cleanup",
     );
     Ok(())
 }
