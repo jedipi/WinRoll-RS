@@ -8,8 +8,8 @@ Visit the [WinRoll RS website](https://jedipi.github.io/WinRoll-RS/) to see how 
 
 Direct downloads for the latest release, v0.1.1:
 
-- [Portable version (ZIP, x64)](https://github.com/jedipi/WinRoll-RS/releases/download/v0.1.0/winroll-0.1.1-x64-portable.zip)
-- [Installer (EXE, x64)](https://github.com/jedipi/WinRoll-RS/releases/download/v0.1.0/winroll-0.1.1-x64-setup.exe)
+- [Portable version (ZIP, x64)](https://github.com/jedipi/WinRoll-RS/releases/download/v0.1.1/winroll-0.1.1-x64-portable.zip)
+- [Installer (EXE, x64)](https://github.com/jedipi/WinRoll-RS/releases/download/v0.1.1/winroll-0.1.1-x64-setup.exe)
 
 WinRoll lets you roll a window up into its title bar, like a window shade. It also has a few small window-management features: Always on Top, Send to Back, transparency, and minimizing windows to the system tray.
 
