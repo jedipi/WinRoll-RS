@@ -6,10 +6,10 @@ Visit the [WinRoll RS website](https://jedipi.github.io/WinRoll-RS/) to see how 
 
 [![Download WinRoll RS](https://img.shields.io/badge/Download-WinRoll%20RS-2563eb?style=for-the-badge)](https://github.com/jedipi/WinRoll-RS/releases/latest)
 
-Direct downloads for the latest release, v0.1.0:
+Direct downloads for the latest release, v0.1.1:
 
-- [Portable version (ZIP, x64)](https://github.com/jedipi/WinRoll-RS/releases/download/v0.1.0/winroll-0.1.0-x64-portable.zip)
-- [Installer (EXE, x64)](https://github.com/jedipi/WinRoll-RS/releases/download/v0.1.0/winroll-0.1.0-x64-setup.exe)
+- [Portable version (ZIP, x64)](https://github.com/jedipi/WinRoll-RS/releases/download/v0.1.1/winroll-0.1.1-x64-portable.zip)
+- [Installer (EXE, x64)](https://github.com/jedipi/WinRoll-RS/releases/download/v0.1.1/winroll-0.1.1-x64-setup.exe)
 
 WinRoll lets you roll a window up into its title bar, like a window shade. It also has a few small window-management features: Always on Top, Send to Back, transparency, and minimizing windows to the system tray.
 
@@ -99,59 +99,6 @@ using the method selected in Options:
 - **As menu** adds the window title under **Minimized** in WinRoll's tray menu.
   Click the title to restore it. The submenu shows **(none)** when empty.
 
-Pause disables the gesture but keeps hidden windows available through their icons or menu entries.
-Unroll all leaves them hidden. Exit shows them before quitting, preserving their
-normal or maximized state; restoring an individual rolled window keeps it rolled.
-If a window cannot be shown, WinRoll keeps its icon or menu entry and lets you retry.
-
-The button must report the native Minimize hit region. Unrecognized custom controls
-and windows running at a different integrity level retain their normal clicks.
-Exit WinRoll through its tray before ending its process: hidden-window state is held
-in memory and cannot be recovered by restarting WinRoll after a forced termination.
-
-## Options
-
-Open **Options...** from the WinRoll RS tray menu to open **Options**. Select
-**Automatically start with Windows** to launch WinRoll RS when you sign in, or
-clear it to disable startup.
-
-Select **Ignore middle mouse button** to disable WinRoll's middle-click actions
-(transparency, Always on Top, and minimize to tray). It is unchecked by default,
-applies immediately, and is saved for the next run. Other apps still receive
-their normal middle clicks.
-
-The **Transparency** slider has 10% steps from **0%** (no transparency) to **100%**
-(fully transparent). The default is **50%**. Changes are saved for the next run and
-apply the next time transparency is enabled on a window.
-
-The **Minimize to tray** group offers **As icon** and **As menu**. The choice is
-saved for the next run and applies to windows minimized afterward. Windows already
-hidden keep their existing icon or menu entry until restored.
-
-## Planned features
-
-### Minimize to Tray
-
-Hide selected windows from the desktop and taskbar, then restore them from the WinRoll system tray menu.
-
-### System tray
-
-WinRoll runs in the Windows notification area.
-
-WinRoll starts enabled. Left-click its tray icon to pause; left-click again to
-enable it. Right-click the icon to open the menu. While Exit recovery is pending,
-use the menu to retry restoration before enabling gestures again.
-
-The planned tray menu includes:
-
-- Options (available now)
-- Rolled windows
-- Hidden windows
-- Enable / Disable WinRoll
-- Start with Windows (available in Options)
-- About
-- Exit
-
 ### Mouse Controls
 
 The classic WinRoll interaction model will be preserved where practical.
@@ -161,24 +108,18 @@ Initial planned controls:
 | Action | Mouse Gesture |
 |---|---|
 | Roll Up / Roll Down | Right-click title bar |
-| Transparency (available now) | Middle-click title bar |
-| Always on Top (available now) | Middle-click Close button |
-| Send to Back (available now) | Right-click Close button |
+| Transparency | Middle-click title bar |
+| Always on Top | Middle-click Close button |
+| Send to Back | Right-click Close button |
 | Minimize to Tray | Middle-click Minimize button |
-
-Mouse actions will eventually be configurable.
 
 ### Polish
 
 Other planned additions include:
 
-- configurable mouse gestures
 - excluded applications
-- keyboard shortcuts
 - optional animations
-- logging
 - portable configuration
-- installer
 - automatic update support
 
 ## Non-goals
