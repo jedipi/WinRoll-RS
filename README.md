@@ -70,30 +70,65 @@ WinRoll saves the window's original size and position so it can restore them exa
 ### Always on Top
 
 Middle-click a window's **Close (X)** button to toggle Always on Top. Middle-click
-it again to turn it off. 
+it again to turn it off. Exiting WinRoll RS through its tray restores the original
+Always on Top state of windows changed with this gesture. Pause and Unroll all
+leave Always on Top unchanged.
+
+### Send to Back
+
+Right-click a window's **Close (X)** button to send it behind other windows without
+minimizing it or changing its size or position. 
+
+### Transparency
+
+Middle-click an empty title-bar area to toggle the configured transparency. Middle-click
+again to restore the window's original appearance. Pause keeps the current appearance
+and disables the gesture; Unroll all leaves transparency unchanged.
+
+At 100% the window is invisible and cannot be clicked. Choose **Exit** in the
+WinRoll RS tray menu to restore affected windows before quitting. Applications
+that use per-pixel layered rendering are excluded.
+
+### Minimize to Tray
+
+Middle-click a window's **Minimize** button to hide it from the desktop and taskbar
+using the method selected in Options:
+
+- **As icon** (the default) gives each window a notification-area icon. Click the
+  icon to restore it; check the hidden-icons overflow if necessary.
+- **As menu** adds the window title under **Minimized** in WinRoll's tray menu.
+  Click the title to restore it. The submenu shows **(none)** when empty.
+
+Pause disables the gesture but keeps hidden windows available through their icons or menu entries.
+Unroll all leaves them hidden. Exit shows them before quitting, preserving their
+normal or maximized state; restoring an individual rolled window keeps it rolled.
+If a window cannot be shown, WinRoll keeps its icon or menu entry and lets you retry.
+
+The button must report the native Minimize hit region. Unrecognized custom controls
+and windows running at a different integrity level retain their normal clicks.
+Exit WinRoll through its tray before ending its process: hidden-window state is held
+in memory and cannot be recovered by restarting WinRoll after a forced termination.
 
 ## Options
 
 Open **Options...** from the WinRoll RS tray menu to open **Options**. Select
 **Automatically start with Windows** to launch WinRoll RS when you sign in, or
-clear it to disable startup. Changes are saved immediately for the current user;
-administrator privileges are not required. Startup is off by default.
+clear it to disable startup.
 
-For the portable version, keep the executable at the same location after enabling
-startup. Disable startup before moving or deleting it, then enable it again from
-the new location if needed. The installer removes the startup entry on uninstall.
+Select **Ignore middle mouse button** to disable WinRoll's middle-click actions
+(transparency, Always on Top, and minimize to tray). It is unchecked by default,
+applies immediately, and is saved for the next run. Other apps still receive
+their normal middle clicks.
+
+The **Transparency** slider has 10% steps from **0%** (no transparency) to **100%**
+(fully transparent). The default is **50%**. Changes are saved for the next run and
+apply the next time transparency is enabled on a window.
+
+The **Minimize to tray** group offers **As icon** and **As menu**. The choice is
+saved for the next run and applies to windows minimized afterward. Windows already
+hidden keep their existing icon or menu entry until restored.
 
 ## Planned features
-
-### Send to Back
-
-Send the selected window behind other windows without minimizing it.
-
-### Transparency
-
-Adjust the transparency of supported windows.
-
-This brings back an original WinRoll feature using modern layered-window APIs.
 
 ### Minimize to Tray
 
@@ -102,6 +137,10 @@ Hide selected windows from the desktop and taskbar, then restore them from the W
 ### System tray
 
 WinRoll runs in the Windows notification area.
+
+WinRoll starts enabled. Left-click its tray icon to pause; left-click again to
+enable it. Right-click the icon to open the menu. While Exit recovery is pending,
+use the menu to retry restoration before enabling gestures again.
 
 The planned tray menu includes:
 
@@ -122,9 +161,9 @@ Initial planned controls:
 | Action | Mouse Gesture |
 |---|---|
 | Roll Up / Roll Down | Right-click title bar |
-| Transparency | Middle-click title bar |
+| Transparency (available now) | Middle-click title bar |
 | Always on Top (available now) | Middle-click Close button |
-| Send to Back | Right-click Close button |
+| Send to Back (available now) | Right-click Close button |
 | Minimize to Tray | Middle-click Minimize button |
 
 Mouse actions will eventually be configurable.

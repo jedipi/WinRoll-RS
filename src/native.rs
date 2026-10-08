@@ -18,7 +18,7 @@ use windows_sys::{
         Security::*,
         System::{Console::*, LibraryLoader::*, Threading::*},
         UI::{
-            Controls::{BST_CHECKED, BST_UNCHECKED},
+            Controls::*,
             HiDpi::*,
             Input::KeyboardAndMouse::{
                 GetAsyncKeyState, INPUT, INPUT_0, INPUT_KEYBOARD, KEYBDINPUT, KEYEVENTF_KEYUP,
@@ -32,6 +32,8 @@ use windows_sys::{
     core::w,
 };
 
+mod tray_windows;
+
 static COMMANDS: OnceLock<SyncSender<Command>> = OnceLock::new();
 static CONTROL_REQUESTS: AtomicU32 = AtomicU32::new(0);
 static RECOVERY_PENDING: AtomicBool = AtomicBool::new(false);
@@ -39,18 +41,28 @@ static RECOVERY_WINDOWS: Mutex<Vec<String>> = Mutex::new(Vec::new());
 static WORKER_FINISHED: AtomicBool = AtomicBool::new(false);
 static TASKBAR_CREATED: OnceLock<u32> = OnceLock::new();
 static TRAY_ICONS: OnceLock<Option<(isize, isize)>> = OnceLock::new();
-static HAS_ROLLED_WINDOWS: AtomicBool = AtomicBool::new(false);
 static ABOUT_WINDOW: AtomicIsize = AtomicIsize::new(0);
 static OPTIONS_WINDOW: AtomicIsize = AtomicIsize::new(0);
+static TRANSPARENCY: AtomicU32 = AtomicU32::new(50);
+static IGNORE_MIDDLE: AtomicBool = AtomicBool::new(false);
+static MINIMIZE_AS_MENU: AtomicBool = AtomicBool::new(false);
+static MINIMIZED_WINDOWS: Mutex<Vec<(u32, String)>> = Mutex::new(Vec::new());
+static RESTORE_TRAY_REQUESTS: Mutex<Vec<u32>> = Mutex::new(Vec::new());
 const ENABLE: u32 = 1;
 const UNROLL_ALL: u32 = 2;
 const PAUSE: u32 = 4;
 const EXIT: u32 = 8;
 const ABOUT: u32 = 16;
 const SETTINGS: u32 = 32;
+const RECREATE_TRAY: u32 = 256;
+const TOGGLE_ENABLED: u32 = 512;
+// TBM_GETPOS is WM_USER, omitted by the windows-sys metadata.
+const TBM_GETPOS: u32 = WM_USER;
 const TRAY_CALLBACK: u32 = WM_APP + 1;
 const TRAY_UPDATE: u32 = WM_APP + 2;
 const WORKER_DONE: u32 = WM_APP + 3;
+const WINDOW_TRAY_CALLBACK: u32 = WM_APP + 4;
+const MINIMIZED_MENU_FIRST: u32 = 0x10000;
 const NIN_KEYSELECT: u32 = NIN_SELECT | NINF_KEY;
 const ALT_TAP_TAG: usize = 0x0057_494e_414c_5421;
 static SUPPRESS_UP: AtomicBool = AtomicBool::new(false);
@@ -63,6 +75,8 @@ static DRAG_ACTIVE: AtomicBool = AtomicBool::new(false);
 static FIXTURE_REFUSES_EXPANSION: AtomicIsize = AtomicIsize::new(0);
 static FIXTURE_MIN_TRACK: AtomicBool = AtomicBool::new(false);
 static FIXTURE_CAPTION_EVERYWHERE: AtomicBool = AtomicBool::new(false);
+static FIXTURE_REFUSES_SHOW: AtomicIsize = AtomicIsize::new(0);
+static FIXTURE_DELAYS_HIDE: AtomicIsize = AtomicIsize::new(0);
 
 #[derive(Clone, Copy)]
 struct Target {
@@ -72,12 +86,15 @@ struct Target {
     rect: RECT,
 }
 enum Command {
-    Probe(POINT, SyncSender<Option<Target>>),
-    ProbeClose(POINT, SyncSender<Option<Target>>),
+    ProbeRight(POINT, SyncSender<Option<(Target, u32)>>),
+    ProbeMiddle(POINT, SyncSender<Option<(Target, u32)>>),
     ProbeRolled(POINT, SyncSender<Option<Target>>),
     FocusRolled(isize, Instant),
     Toggle(Target),
     ToggleTopmost(Target),
+    ToggleTransparency(Target),
+    SendToBack(Target),
+    MinimizeToTray(Target),
 }
 struct Drag {
     target: Target,
@@ -94,14 +111,31 @@ struct Saved {
     target: Target,
     marker: usize,
     dpi: u32,
-    fork: bool,
 }
 struct Manager {
+    hidden: HashMap<u32, tray_windows::Hidden>,
+    hidden_property: Vec<u16>,
+    tray_owner: isize,
     windows: HashMap<isize, Saved>,
+    topmost: HashMap<isize, (Target, usize, bool)>,
+    topmost_property: Vec<u16>,
+    transparent: HashMap<isize, Transparent>,
+    transparency_property: Vec<u16>,
+    roll_recovery: bool,
     exit_pending: bool,
     property: Vec<u16>,
     next_marker: usize,
     integrity: u32,
+}
+
+#[derive(Clone, Copy)]
+struct Transparent {
+    target: Target,
+    marker: usize,
+    layered: bool,
+    color: u32,
+    alpha: u8,
+    flags: u32,
 }
 
 fn log(message: impl std::fmt::Display) {
@@ -121,6 +155,10 @@ fn bounds(r: RECT) -> [i32; 4] {
     [r.left, r.top, r.right, r.bottom]
 }
 
+fn transparency_alpha(percent: u32) -> u8 {
+    ((100 - percent.min(100)) * 255 / 100) as u8
+}
+
 fn caption_height(dpi: u32) -> i32 {
     unsafe {
         GetSystemMetricsForDpi(SM_CYCAPTION, dpi)
@@ -129,32 +167,8 @@ fn caption_height(dpi: u32) -> i32 {
     }
 }
 
-fn rolled_height(dpi: u32, fork: bool) -> i32 {
-    let height = caption_height(dpi) + (dpi as i32 + 48) / 96;
-    if fork {
-        // Fork's tab row begins about 12 pixels above this height at 96 DPI.
-        height - (12 * dpi as i32 + 48) / 96
-    } else {
-        height
-    }
-}
-
-fn is_fork(pid: u32) -> bool {
-    unsafe {
-        let process = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, 0, pid);
-        if process.is_null() {
-            return false;
-        }
-        let mut path = [0u16; 1024];
-        let mut length = path.len() as u32;
-        let named = QueryFullProcessImageNameW(process, 0, path.as_mut_ptr(), &mut length) != 0;
-        CloseHandle(process);
-        named
-            && String::from_utf16_lossy(&path[..length as usize])
-                .rsplit('\\')
-                .next()
-                .is_some_and(|name| name.eq_ignore_ascii_case("Fork.exe"))
-    }
+fn rolled_height(dpi: u32) -> i32 {
+    caption_height(dpi) + (dpi as i32 + 48) / 96
 }
 
 fn integrity(pid: u32) -> Option<u32> {
@@ -234,7 +248,21 @@ impl Manager {
             return Err("Run WinRoll RS without administrator privileges".into());
         }
         Ok(Self {
+            hidden: HashMap::new(),
+            hidden_property: format!("WinRoll-RS.Hidden.{pid}\0")
+                .encode_utf16()
+                .collect(),
+            tray_owner: 0,
             windows: HashMap::new(),
+            topmost: HashMap::new(),
+            transparent: HashMap::new(),
+            roll_recovery: false,
+            transparency_property: format!("WinRoll-RS.Transparency.{pid}\0")
+                .encode_utf16()
+                .collect(),
+            topmost_property: format!("WinRoll-RS.Topmost.{pid}\0")
+                .encode_utf16()
+                .collect(),
             exit_pending: false,
             property: format!("WinRoll-RS.Experiment.{pid}\0")
                 .encode_utf16()
@@ -249,6 +277,11 @@ impl Manager {
     }
 
     fn probe_hit(&self, point: POINT, expected_hit: u32) -> Option<Target> {
+        self.probe_hits(point, &[expected_hit])
+            .map(|(target, _)| target)
+    }
+
+    fn probe_hits(&self, point: POINT, expected_hits: &[u32]) -> Option<(Target, u32)> {
         // SAFETY: Windows validates window handles and the writable output pointers.
         unsafe {
             let under_pointer = WindowFromPoint(point);
@@ -256,7 +289,7 @@ impl Manager {
             if hwnd.is_null()
                 || hwnd == GetConsoleWindow()
                 || !visible_caption(hwnd)
-                || (expected_hit == HTCAPTION && !ordinary(hwnd))
+                || (expected_hits == [HTCAPTION] && !ordinary(hwnd))
             {
                 log(format!(
                     "PASS THROUGH: ineligible hwnd={:#x} snapped={} maximized={} minimized={}",
@@ -289,8 +322,7 @@ impl Manager {
             let y = i16::try_from(point.y).ok()?;
             let packed = ((u32::from(y as u16) << 16) | u32::from(x as u16)) as isize;
             let mut hit = 0;
-            // Modern frames may host captions in a child HWND. Its hit result is authoritative;
-            // never override an interactive child with a parent's less specific caption result.
+            // Child hits normally win, so controls cannot be overridden by a parent caption.
             if SendMessageTimeoutW(
                 under_pointer,
                 WM_NCHITTEST,
@@ -303,15 +335,48 @@ impl Manager {
             {
                 return None;
             }
-            if hit != expected_hit as usize
-                && !(expected_hit == HTCLOSE
-                    && hit == HTCLIENT as usize
-                    && is_fork(pid)
-                    && crate::accessibility::fork_close(point.x, point.y, pid))
+            // UWP's CoreWindow covers the host caption but reports HTCLIENT there.
+            // Only this direct child/frame pair delegates caption recognition to the host.
+            if hit == HTCLIENT as usize
+                && expected_hits.contains(&HTCAPTION)
+                && GetParent(under_pointer) == hwnd
+                && [
+                    (under_pointer, "Windows.UI.Core.CoreWindow"),
+                    (hwnd, "ApplicationFrameWindow"),
+                ]
+                .iter()
+                .all(|(window, expected)| {
+                    let mut class = [0u16; 64];
+                    let length = GetClassNameW(*window, class.as_mut_ptr(), class.len() as i32);
+                    String::from_utf16_lossy(&class[..length as usize]) == *expected
+                })
             {
+                let mut frame_hit = 0;
+                if SendMessageTimeoutW(
+                    hwnd,
+                    WM_NCHITTEST,
+                    0,
+                    packed,
+                    SMTO_ABORTIFHUNG | SMTO_BLOCK,
+                    20,
+                    &mut frame_hit,
+                ) != 0
+                    && frame_hit == HTCAPTION as usize
+                {
+                    hit = frame_hit;
+                }
+            }
+            let recognized = expected_hits
+                .iter()
+                .copied()
+                .find(|expected| hit == *expected as usize);
+            let Some(recognized) = recognized else {
                 log(format!(
-                    "PASS THROUGH: hit-test={hit} expected={expected_hit}"
+                    "PASS THROUGH: hit-test={hit} expected={expected_hits:?}"
                 ));
+                return None;
+            };
+            if recognized == HTCAPTION && !ordinary(hwnd) {
                 return None;
             }
             let target = Target {
@@ -320,7 +385,8 @@ impl Manager {
                 tid,
                 rect: before,
             };
-            (same_target(target) && bounds(rect(hwnd)?) == bounds(before)).then_some(target)
+            (same_target(target) && bounds(rect(hwnd)?) == bounds(before))
+                .then_some((target, recognized))
         }
     }
 
@@ -331,7 +397,72 @@ impl Manager {
             }
     }
 
-    fn toggle_topmost(&self, target: Target) {
+    fn owns_topmost(&self, target: Target, marker: usize) -> bool {
+        same_target(target)
+            && unsafe {
+                GetPropW(target.hwnd as HWND, self.topmost_property.as_ptr()) as usize == marker
+            }
+    }
+
+    fn restore_topmost(&mut self) {
+        for (key, (target, marker, original)) in self.topmost.clone() {
+            if !self.owns_topmost(target, marker) {
+                self.topmost.remove(&key);
+                continue;
+            }
+            let hwnd = key as HWND;
+            unsafe {
+                if SetWindowPos(
+                    hwnd,
+                    if original {
+                        HWND_TOPMOST
+                    } else {
+                        HWND_NOTOPMOST
+                    },
+                    0,
+                    0,
+                    0,
+                    0,
+                    SWP_NOMOVE
+                        | SWP_NOSIZE
+                        | SWP_NOACTIVATE
+                        | SWP_NOOWNERZORDER
+                        | SWP_ASYNCWINDOWPOS,
+                ) == 0
+                {
+                    continue;
+                }
+            }
+            let deadline = Instant::now() + Duration::from_millis(350);
+            let mut stable = 0;
+            loop {
+                if !self.owns_topmost(target, marker) {
+                    self.topmost.remove(&key);
+                    break;
+                }
+                if (unsafe { GetWindowLongW(hwnd, GWL_EXSTYLE) } as u32 & WS_EX_TOPMOST != 0)
+                    == original
+                {
+                    stable += 1;
+                    if stable == 5 {
+                        unsafe {
+                            RemovePropW(hwnd, self.topmost_property.as_ptr());
+                        }
+                        self.topmost.remove(&key);
+                        break;
+                    }
+                } else {
+                    stable = 0;
+                }
+                if Instant::now() >= deadline {
+                    break;
+                }
+                thread::sleep(Duration::from_millis(20));
+            }
+        }
+    }
+
+    fn toggle_topmost(&mut self, target: Target) {
         let hwnd = target.hwnd as HWND;
         if !same_target(target)
             || !visible_caption(hwnd)
@@ -344,6 +475,19 @@ impl Manager {
         // Use the current native state, including topmost set by the target or another utility.
         unsafe {
             let topmost = GetWindowLongW(hwnd, GWL_EXSTYLE) as u32 & WS_EX_TOPMOST != 0;
+            if !self
+                .topmost
+                .get(&target.hwnd)
+                .is_some_and(|(saved, marker, _)| self.owns_topmost(*saved, *marker))
+            {
+                let marker = self.next_marker;
+                self.next_marker += 1;
+                if SetPropW(hwnd, self.topmost_property.as_ptr(), marker as HANDLE) == 0 {
+                    log("REJECT: could not mark topmost window identity");
+                    return;
+                }
+                self.topmost.insert(target.hwnd, (target, marker, topmost));
+            }
             if SetWindowPos(
                 hwnd,
                 if topmost {
@@ -359,6 +503,149 @@ impl Manager {
             ) == 0
             {
                 log(format!("FAIL topmost hwnd={:#x}", target.hwnd));
+            }
+        }
+    }
+
+    fn owns_transparency(&self, saved: Transparent) -> bool {
+        same_target(saved.target)
+            && unsafe {
+                GetPropW(
+                    saved.target.hwnd as HWND,
+                    self.transparency_property.as_ptr(),
+                ) as usize
+                    == saved.marker
+            }
+    }
+
+    fn restore_transparency(&mut self, key: isize) {
+        let Some(saved) = self.transparent.get(&key).copied() else {
+            return;
+        };
+        if !self.owns_transparency(saved) {
+            self.transparent.remove(&key);
+            return;
+        }
+        // Preserve unrelated extended styles and the target's original layered attributes.
+        unsafe {
+            let hwnd = key as HWND;
+            let restored = if saved.layered {
+                SetLayeredWindowAttributes(hwnd, saved.color, saved.alpha, saved.flags) != 0
+            } else {
+                let style = GetWindowLongW(hwnd, GWL_EXSTYLE) as u32;
+                SetLastError(0);
+                SetWindowLongW(hwnd, GWL_EXSTYLE, (style & !WS_EX_LAYERED) as i32);
+                GetLastError() == 0 && GetWindowLongW(hwnd, GWL_EXSTYLE) as u32 & WS_EX_LAYERED == 0
+            };
+            if restored {
+                RemovePropW(hwnd, self.transparency_property.as_ptr());
+                self.transparent.remove(&key);
+                RedrawWindow(
+                    hwnd,
+                    std::ptr::null(),
+                    null_mut(),
+                    RDW_INVALIDATE | RDW_FRAME | RDW_ALLCHILDREN,
+                );
+            }
+        }
+    }
+
+    fn restore_all_transparency(&mut self) {
+        for key in self.transparent.keys().copied().collect::<Vec<_>>() {
+            self.restore_transparency(key);
+        }
+    }
+
+    fn toggle_transparency(&mut self, target: Target) {
+        let hwnd = target.hwnd as HWND;
+        if !same_target(target)
+            || !visible_caption(hwnd)
+            || rect(hwnd).map(bounds) != Some(bounds(target.rect))
+            || integrity(target.pid) != Some(self.integrity)
+        {
+            return;
+        }
+        if let Some(saved) = self.transparent.get(&target.hwnd).copied() {
+            let owned = self.owns_transparency(saved);
+            self.restore_transparency(target.hwnd);
+            if owned {
+                return;
+            }
+        }
+        let percent = TRANSPARENCY.load(Ordering::Relaxed);
+        // Zero means no transparency; do not change windows with their own alpha effects.
+        if percent == 0 {
+            return;
+        }
+        unsafe {
+            let style = GetWindowLongW(hwnd, GWL_EXSTYLE) as u32;
+            let mut saved = Transparent {
+                target,
+                marker: self.next_marker,
+                layered: style & WS_EX_LAYERED != 0,
+                color: 0,
+                alpha: 255,
+                flags: 0,
+            };
+            // Per-pixel layered windows cannot be safely restored with this API.
+            if saved.layered
+                && GetLayeredWindowAttributes(
+                    hwnd,
+                    &mut saved.color,
+                    &mut saved.alpha,
+                    &mut saved.flags,
+                ) == 0
+            {
+                return;
+            }
+            self.next_marker += 1;
+            if SetPropW(
+                hwnd,
+                self.transparency_property.as_ptr(),
+                saved.marker as HANDLE,
+            ) == 0
+            {
+                return;
+            }
+            self.transparent.insert(target.hwnd, saved);
+            SetLastError(0);
+            SetWindowLongW(hwnd, GWL_EXSTYLE, (style | WS_EX_LAYERED) as i32);
+            if GetLastError() != 0
+                || SetLayeredWindowAttributes(
+                    hwnd,
+                    saved.color,
+                    transparency_alpha(percent),
+                    saved.flags | LWA_ALPHA,
+                ) == 0
+            {
+                self.restore_transparency(target.hwnd);
+            }
+        }
+    }
+
+    fn send_to_back(&self, target: Target) {
+        let hwnd = target.hwnd as HWND;
+        if !same_target(target)
+            || !visible_caption(hwnd)
+            || rect(hwnd).map(bounds) != Some(bounds(target.rect))
+            || integrity(target.pid) != Some(self.integrity)
+        {
+            log("CANCEL: send-to-back target changed after hit-test");
+            return;
+        }
+        // HWND_BOTTOM also clears Always on Top; keep geometry and activation unchanged.
+        unsafe {
+            if SetWindowPos(
+                hwnd,
+                HWND_BOTTOM,
+                0,
+                0,
+                0,
+                0,
+                SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE | SWP_NOOWNERZORDER | SWP_ASYNCWINDOWPOS,
+            ) == 0
+            {
+                log(format!("FAIL send-to-back hwnd={:#x}", target.hwnd));
             }
         }
     }
@@ -381,8 +668,7 @@ impl Manager {
         if dpi == 0 {
             return;
         }
-        let fork = is_fork(target.pid);
-        let height = rolled_height(dpi, fork);
+        let height = rolled_height(dpi);
         let (width, old_height) = dimensions(target.rect);
         if height <= 0 || height >= old_height {
             return;
@@ -399,7 +685,6 @@ impl Manager {
                 target,
                 marker,
                 dpi,
-                fork,
             },
         );
         if self.resize(
@@ -479,7 +764,7 @@ impl Manager {
             let Some(current) = rect(key as HWND) else {
                 continue;
             };
-            let height = rolled_height(dpi, saved.fork);
+            let height = rolled_height(dpi);
             // Keep the saved physical width: DPI-driven width changes shift the
             // monitor boundary while a rolled window is being dragged.
             let width = dimensions(saved.target.rect).0;
@@ -531,7 +816,7 @@ impl Manager {
         let hwnd = position.key as HWND;
         let width = dimensions(saved.target.rect).0;
         let dpi = unsafe { GetDpiForWindow(hwnd) };
-        let height = rolled_height(dpi, saved.fork);
+        let height = rolled_height(dpi);
         if dpi == 0 || height <= 0 {
             return;
         }
@@ -638,7 +923,7 @@ impl Manager {
             current.left,
             current.top,
             width,
-            rolled_height(current_dpi, saved.fork),
+            rolled_height(current_dpi),
             [work.left, work.top, work.right, work.bottom],
         );
         log(format!(
@@ -667,10 +952,32 @@ impl Manager {
 
     fn publish_recovery(&self) {
         let mut affected = Vec::new();
-        for saved in self.windows.values() {
+        for target in self
+            .windows
+            .values()
+            .filter(|_| self.exit_pending || self.roll_recovery)
+            .map(|saved| saved.target)
+            .chain(
+                self.topmost
+                    .values()
+                    .filter(|_| self.exit_pending)
+                    .map(|(target, _, _)| *target),
+            )
+            .chain(
+                self.transparent
+                    .values()
+                    .filter(|_| self.exit_pending)
+                    .map(|saved| saved.target),
+            )
+            .chain(
+                self.hidden
+                    .values()
+                    .filter(|_| self.exit_pending)
+                    .map(|saved| saved.target),
+            )
+        {
             let mut title = [0u16; 128];
-            let length =
-                unsafe { GetWindowTextW(saved.target.hwnd as HWND, title.as_mut_ptr(), 128) };
+            let length = unsafe { GetWindowTextW(target.hwnd as HWND, title.as_mut_ptr(), 128) };
             let name = if length > 0 {
                 String::from_utf16_lossy(&title[..length as usize])
             } else {
@@ -678,10 +985,11 @@ impl Manager {
             };
             affected.push(format!(
                 "{name} (PID {}, HWND {:#x})",
-                saved.target.pid, saved.target.hwnd
+                target.pid, target.hwnd
             ));
         }
         affected.sort();
+        affected.dedup();
         let pending = !affected.is_empty();
         *RECOVERY_WINDOWS.lock().unwrap() = affected;
         RECOVERY_PENDING.store(pending, Ordering::Relaxed);
@@ -689,8 +997,17 @@ impl Manager {
 
     // Returns true only when Exit has verified every surviving managed window.
     fn control(&mut self, action: u32) -> bool {
+        if action == TOGGLE_ENABLED {
+            return self.control(if STOPPING.load(Ordering::Relaxed) {
+                ENABLE
+            } else {
+                PAUSE
+            });
+        }
         if action == ENABLE {
-            if self.windows.is_empty() || !RECOVERY_PENDING.load(Ordering::Relaxed) {
+            if !self.exit_pending
+                && (self.windows.is_empty() || !RECOVERY_PENDING.load(Ordering::Relaxed))
+            {
                 STOPPING.store(false, Ordering::Relaxed);
             }
             return false;
@@ -703,7 +1020,17 @@ impl Manager {
             STOPPING.store(true, Ordering::Relaxed);
             self.exit_pending = true;
         }
-        let restored = self.restore_all();
+        if self.exit_pending {
+            self.restore_all_hidden();
+        }
+        let mut restored = self.restore_all();
+        self.roll_recovery = !restored;
+        if self.exit_pending {
+            self.restore_topmost();
+            self.restore_all_transparency();
+            restored &=
+                self.topmost.is_empty() && self.transparent.is_empty() && self.hidden.is_empty();
+        }
         self.publish_recovery();
         log(format!("CONTROL action={action} restored={restored}"));
         self.exit_pending && restored
@@ -786,23 +1113,31 @@ unsafe extern "system" fn mouse_hook(code: i32, message: WPARAM, data: LPARAM) -
                 }
             }
             if matches!(message as u32, WM_RBUTTONDOWN | WM_MBUTTONDOWN)
+                && (message as u32 != WM_MBUTTONDOWN || !IGNORE_MIDDLE.load(Ordering::Relaxed))
                 && event.flags & LLMHF_LOWER_IL_INJECTED == 0
                 && !STOPPING.load(Ordering::Relaxed)
             {
                 let (reply, receive) = mpsc::sync_channel(1);
                 if let Some(sender) = COMMANDS.get() {
-                    // A timed-out probe cannot resize anything: only the subsequent Toggle can.
+                    // A timed-out probe cannot change a window: only the subsequent command can.
                     let middle = message as u32 == WM_MBUTTONDOWN;
                     let probe = if middle {
-                        Command::ProbeClose(event.pt, reply)
+                        Command::ProbeMiddle(event.pt, reply)
                     } else {
-                        Command::Probe(event.pt, reply)
+                        Command::ProbeRight(event.pt, reply)
                     };
                     if sender.try_send(probe).is_ok()
-                        && let Ok(Some(target)) = receive.recv_timeout(Duration::from_millis(40))
+                        && let Ok(Some((target, hit))) =
+                            receive.recv_timeout(Duration::from_millis(40))
                         && sender
-                            .try_send(if middle {
+                            .try_send(if middle && hit == HTMINBUTTON {
+                                Command::MinimizeToTray(target)
+                            } else if middle && hit == HTCAPTION {
+                                Command::ToggleTransparency(target)
+                            } else if middle {
                                 Command::ToggleTopmost(target)
+                            } else if hit == HTCLOSE {
+                                Command::SendToBack(target)
                             } else {
                                 Command::Toggle(target)
                             })
@@ -845,22 +1180,19 @@ fn tray_icon(hwnd: HWND, operation: u32) -> bool {
     else {
         return false;
     };
+    let paused = STOPPING.load(Ordering::Relaxed);
     let mut icon = NOTIFYICONDATAW {
         cbSize: size_of::<NOTIFYICONDATAW>() as u32,
         hWnd: hwnd,
         uID: 1,
         uFlags: NIF_MESSAGE | NIF_ICON | NIF_TIP | NIF_SHOWTIP,
         uCallbackMessage: TRAY_CALLBACK,
-        hIcon: if HAS_ROLLED_WINDOWS.load(Ordering::Relaxed) {
-            rolled as HICON
-        } else {
-            expanded as HICON
-        },
+        hIcon: if paused { expanded } else { rolled } as HICON,
         ..Default::default()
     };
     let tip = if RECOVERY_PENDING.load(Ordering::Relaxed) {
         "WinRoll RS - unroll pending; retry Unroll all or Exit"
-    } else if STOPPING.load(Ordering::Relaxed) {
+    } else if paused {
         "WinRoll RS - paused"
     } else {
         "WinRoll RS - enabled"
@@ -915,13 +1247,45 @@ unsafe extern "system" fn about_proc(hwnd: HWND, message: u32, w: WPARAM, l: LPA
             WM_CREATE => {
                 let dpi = GetDpiForWindow(hwnd) as i32;
                 let scale = |n| n * dpi / 96;
+                let controls = INITCOMMONCONTROLSEX {
+                    dwSize: size_of::<INITCOMMONCONTROLSEX>() as u32,
+                    dwICC: ICC_LINK_CLASS,
+                };
+                if InitCommonControlsEx(&controls) == 0 {
+                    return -1;
+                }
+                let link = CreateWindowExW(
+                    0,
+                    WC_LINK,
+                    w!(
+                        "<a href=\"https://github.com/jedipi/WinRoll-RS\">https://github.com/jedipi/WinRoll-RS</a>"
+                    ),
+                    WS_CHILD | WS_VISIBLE | WS_TABSTOP,
+                    scale(20),
+                    scale(104),
+                    scale(280),
+                    scale(28),
+                    hwnd,
+                    2usize as HMENU,
+                    GetModuleHandleW(null_mut()),
+                    null_mut(),
+                );
+                if link.is_null() {
+                    return -1;
+                }
+                SendMessageW(
+                    link,
+                    WM_SETFONT,
+                    GetStockObject(DEFAULT_GUI_FONT) as usize,
+                    1,
+                );
                 let button = CreateWindowExW(
                     0,
                     w!("BUTTON"),
                     w!("Close"),
-                    WS_CHILD | WS_VISIBLE | BS_DEFPUSHBUTTON as u32,
+                    WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_DEFPUSHBUTTON as u32,
                     scale(216),
-                    scale(104),
+                    scale(140),
                     scale(80),
                     scale(28),
                     hwnd,
@@ -973,6 +1337,23 @@ unsafe extern "system" fn about_proc(hwnd: HWND, message: u32, w: WPARAM, l: LPA
                 DestroyWindow(hwnd);
                 return 0;
             }
+            WM_NOTIFY if l != 0 => {
+                let notification = &*(l as *const NMHDR);
+                if notification.hwndFrom != GetDlgItem(hwnd, 2)
+                    || !matches!(notification.code, NM_CLICK | NM_RETURN)
+                {
+                    return DefWindowProcW(hwnd, message, w, l);
+                }
+                ShellExecuteW(
+                    hwnd,
+                    w!("open"),
+                    w!("https://github.com/jedipi/WinRoll-RS"),
+                    std::ptr::null(),
+                    std::ptr::null(),
+                    SW_SHOWNORMAL,
+                );
+                return 0;
+            }
             WM_CLOSE => {
                 DestroyWindow(hwnd);
                 return 0;
@@ -1002,6 +1383,18 @@ fn options_error(owner: HWND, error: &io::Error) {
     };
 }
 
+fn update_transparency_label(hwnd: HWND) {
+    let text: Vec<u16> = format!(
+        "{}% (0% opaque, 100% invisible)\0",
+        TRANSPARENCY.load(Ordering::Relaxed)
+    )
+    .encode_utf16()
+    .collect();
+    unsafe {
+        SetWindowTextW(GetDlgItem(hwnd, 8), text.as_ptr());
+    }
+}
+
 unsafe extern "system" fn options_proc(hwnd: HWND, message: u32, w: WPARAM, l: LPARAM) -> LRESULT {
     // SAFETY: this thread owns the options window and its standard child controls.
     unsafe {
@@ -1026,7 +1419,34 @@ unsafe extern "system" fn options_proc(hwnd: HWND, message: u32, w: WPARAM, l: L
                         300,
                         28,
                     ),
-                    (2, w!("Close"), BS_DEFPUSHBUTTON, 236, 80, 80, 28),
+                    (
+                        7,
+                        w!("&Ignore middle mouse button"),
+                        BS_AUTOCHECKBOX,
+                        20,
+                        58,
+                        300,
+                        28,
+                    ),
+                    (
+                        10,
+                        w!("As &icon"),
+                        BS_AUTORADIOBUTTON | WS_GROUP as i32,
+                        40,
+                        272,
+                        120,
+                        24,
+                    ),
+                    (11, w!("As &menu"), BS_AUTORADIOBUTTON, 180, 272, 120, 24),
+                    (
+                        2,
+                        w!("Close"),
+                        BS_DEFPUSHBUTTON | WS_GROUP as i32,
+                        236,
+                        328,
+                        80,
+                        28,
+                    ),
                 ] {
                     let control = CreateWindowExW(
                         0,
@@ -1052,6 +1472,121 @@ unsafe extern "system" fn options_proc(hwnd: HWND, message: u32, w: WPARAM, l: L
                         1,
                     );
                 }
+                let controls = INITCOMMONCONTROLSEX {
+                    dwSize: size_of::<INITCOMMONCONTROLSEX>() as u32,
+                    dwICC: ICC_BAR_CLASSES,
+                };
+                if InitCommonControlsEx(&controls) == 0 {
+                    return -1;
+                }
+                for (id, class, text, style, y, height) in [
+                    (
+                        9,
+                        w!("BUTTON"),
+                        w!("Minimize to tray"),
+                        BS_GROUPBOX as u32,
+                        248,
+                        64,
+                    ),
+                    (
+                        5,
+                        w!("BUTTON"),
+                        w!("&Transparency"),
+                        BS_GROUPBOX as u32,
+                        98,
+                        142,
+                    ),
+                    (
+                        4,
+                        TRACKBAR_CLASSW,
+                        w!("Transparency"),
+                        WS_TABSTOP | TBS_AUTOTICKS,
+                        124,
+                        36,
+                    ),
+                    (8, w!("STATIC"), w!(""), 0, 164, 20),
+                    (
+                        6,
+                        w!("STATIC"),
+                        w!("Invisible windows: choose Exit in the tray to restore."),
+                        0,
+                        190,
+                        40,
+                    ),
+                ] {
+                    let control = CreateWindowExW(
+                        0,
+                        class,
+                        text,
+                        WS_CHILD | WS_VISIBLE | style,
+                        scale(if matches!(id, 4 | 6 | 8) { 30 } else { 20 }),
+                        scale(y),
+                        scale(if matches!(id, 4 | 6 | 8) { 280 } else { 300 }),
+                        scale(height),
+                        hwnd,
+                        id as HMENU,
+                        GetModuleHandleW(null_mut()),
+                        null_mut(),
+                    );
+                    if control.is_null() {
+                        return -1;
+                    }
+                    SendMessageW(
+                        control,
+                        WM_SETFONT,
+                        GetStockObject(DEFAULT_GUI_FONT) as usize,
+                        1,
+                    );
+                }
+                let slider = GetDlgItem(hwnd, 4);
+                SendMessageW(slider, TBM_SETRANGE, 1, 10 << 16);
+                SendMessageW(slider, TBM_SETPAGESIZE, 0, 1);
+                SendMessageW(
+                    slider,
+                    TBM_SETPOS,
+                    1,
+                    (TRANSPARENCY.load(Ordering::Relaxed) / 10) as isize,
+                );
+                // Keep keyboard order checkboxes, labelled slider, Close.
+                SetWindowPos(
+                    GetDlgItem(hwnd, 5),
+                    GetDlgItem(hwnd, 7),
+                    0,
+                    0,
+                    0,
+                    0,
+                    SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE,
+                );
+                SetWindowPos(
+                    slider,
+                    GetDlgItem(hwnd, 5),
+                    0,
+                    0,
+                    0,
+                    0,
+                    SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE,
+                );
+                update_transparency_label(hwnd);
+                CheckRadioButton(
+                    hwnd,
+                    10,
+                    11,
+                    if MINIMIZE_AS_MENU.load(Ordering::Relaxed) {
+                        11
+                    } else {
+                        10
+                    },
+                );
+                SendMessageW(
+                    GetDlgItem(hwnd, 7),
+                    BM_SETCHECK,
+                    if IGNORE_MIDDLE.load(Ordering::Relaxed) {
+                        BST_CHECKED
+                    } else {
+                        BST_UNCHECKED
+                    } as usize,
+                    0,
+                );
                 let checkbox = GetDlgItem(hwnd, 3);
                 SendMessageW(
                     checkbox,
@@ -1060,6 +1595,28 @@ unsafe extern "system" fn options_proc(hwnd: HWND, message: u32, w: WPARAM, l: L
                     0,
                 );
                 SetFocus(checkbox);
+                return 0;
+            }
+            WM_HSCROLL if l == GetDlgItem(hwnd, 4) as isize => {
+                let slider = GetDlgItem(hwnd, 4);
+                let percent = SendMessageW(slider, TBM_GETPOS, 0, 0) as u32 * 10;
+                if percent != TRANSPARENCY.load(Ordering::Relaxed) {
+                    match crate::transparency_settings::save(percent) {
+                        Ok(()) => {
+                            TRANSPARENCY.store(percent, Ordering::Relaxed);
+                        }
+                        Err(error) => {
+                            SendMessageW(
+                                slider,
+                                TBM_SETPOS,
+                                1,
+                                (TRANSPARENCY.load(Ordering::Relaxed) / 10) as isize,
+                            );
+                            options_error(hwnd, &error);
+                        }
+                    }
+                    update_transparency_label(hwnd);
+                }
                 return 0;
             }
             WM_COMMAND if w & 0xffff == 3 && (w >> 16) == BN_CLICKED as usize => {
@@ -1073,6 +1630,43 @@ unsafe extern "system" fn options_proc(hwnd: HWND, message: u32, w: WPARAM, l: L
                         0,
                     );
                     options_error(hwnd, &error);
+                }
+                return 0;
+            }
+            WM_COMMAND if w & 0xffff == 7 && (w >> 16) == BN_CLICKED as usize => {
+                let checkbox = GetDlgItem(hwnd, 7);
+                let ignore = SendMessageW(checkbox, BM_GETCHECK, 0, 0) == BST_CHECKED as isize;
+                match crate::transparency_settings::save_ignore_middle(ignore) {
+                    Ok(()) => IGNORE_MIDDLE.store(ignore, Ordering::Relaxed),
+                    Err(error) => {
+                        SendMessageW(
+                            checkbox,
+                            BM_SETCHECK,
+                            if ignore { BST_UNCHECKED } else { BST_CHECKED } as usize,
+                            0,
+                        );
+                        options_error(hwnd, &error);
+                    }
+                }
+                return 0;
+            }
+            WM_COMMAND if matches!(w & 0xffff, 10 | 11) && (w >> 16) == BN_CLICKED as usize => {
+                let as_menu = w & 0xffff == 11;
+                match crate::transparency_settings::save_minimize_as_menu(as_menu) {
+                    Ok(()) => MINIMIZE_AS_MENU.store(as_menu, Ordering::Relaxed),
+                    Err(error) => {
+                        CheckRadioButton(
+                            hwnd,
+                            10,
+                            11,
+                            if MINIMIZE_AS_MENU.load(Ordering::Relaxed) {
+                                11
+                            } else {
+                                10
+                            },
+                        );
+                        options_error(hwnd, &error);
+                    }
                 }
                 return 0;
             }
@@ -1136,7 +1730,7 @@ fn show_auxiliary(owner: HWND, options: bool) {
             left: 0,
             top: 0,
             right: (if options { 340 } else { 320 }) * dpi as i32 / 96,
-            bottom: (if options { 128 } else { 150 }) * dpi as i32 / 96,
+            bottom: (if options { 376 } else { 186 }) * dpi as i32 / 96,
         };
         let style = WS_OVERLAPPED | WS_CAPTION | WS_SYSMENU;
         AdjustWindowRectExForDpi(&mut bounds, style, 0, WS_EX_DLGMODALFRAME, dpi);
@@ -1146,7 +1740,7 @@ fn show_auxiliary(owner: HWND, options: bool) {
             WS_EX_DLGMODALFRAME,
             class.lpszClassName,
             if options {
-                w!("Options")
+                w!("WinRoll RS - Options")
             } else {
                 w!("About WinRoll RS")
             },
@@ -1174,32 +1768,90 @@ fn show_auxiliary(owner: HWND, options: bool) {
     }
 }
 
+fn append_minimized_menu(menu: HMENU, windows: &[(u32, String)]) -> HMENU {
+    // SAFETY: the UI thread owns both menus; the parent takes ownership of the submenu.
+    unsafe {
+        let submenu = CreatePopupMenu();
+        if submenu.is_null() {
+            return submenu;
+        }
+        if windows.is_empty() {
+            AppendMenuW(submenu, MF_STRING | MF_GRAYED, 0, w!("(none)"));
+        }
+        for (index, (_, title)) in windows.iter().enumerate() {
+            let label: Vec<u16> = title
+                .replace('&', "&&")
+                .encode_utf16()
+                .chain(Some(0))
+                .collect();
+            AppendMenuW(
+                submenu,
+                MF_STRING,
+                MINIMIZED_MENU_FIRST as usize + index,
+                label.as_ptr(),
+            );
+        }
+        if AppendMenuW(menu, MF_POPUP, submenu as usize, w!("&Minimized")) == 0 {
+            DestroyMenu(submenu);
+            return null_mut();
+        }
+        submenu
+    }
+}
+
+fn restore_minimized_selection(action: u32, windows: &[(u32, String)]) {
+    if let Some((id, _)) = action
+        .checked_sub(MINIMIZED_MENU_FIRST)
+        .and_then(|index| windows.get(index as usize))
+    {
+        RESTORE_TRAY_REQUESTS.lock().unwrap().push(*id);
+    }
+}
+
 unsafe extern "system" fn tray_proc(hwnd: HWND, message: u32, w: WPARAM, l: LPARAM) -> LRESULT {
     // SAFETY: this thread owns the hidden tray window, menu and message loop.
     unsafe {
         if TASKBAR_CREATED.get().is_some_and(|id| message == *id) {
             tray_icon(hwnd, NIM_ADD);
+            request_control(RECREATE_TRAY);
             return 0;
         }
         match message {
+            WINDOW_TRAY_CALLBACK => {
+                // These icons use the original callback format: w is the full icon ID.
+                if matches!(
+                    l as u32,
+                    WM_LBUTTONUP | WM_RBUTTONUP | NIN_SELECT | NIN_KEYSELECT
+                ) {
+                    RESTORE_TRAY_REQUESTS.lock().unwrap().push(w as u32);
+                }
+                return 0;
+            }
             WORKER_DONE => {
                 // TrackPopupMenu has its own message loop. Completion must also close that loop.
                 EndMenu();
                 return 0;
             }
-            TRAY_CALLBACK
-                if matches!(
-                    l as u32 & 0xffff,
-                    WM_CONTEXTMENU | NIN_SELECT | NIN_KEYSELECT
-                ) =>
-            {
+            TRAY_CALLBACK if matches!(l as u32 & 0xffff, NIN_SELECT | NIN_KEYSELECT) => {
+                if !RECOVERY_PENDING.load(Ordering::Relaxed) {
+                    // Preserve click parity even when two clicks arrive before the worker wakes.
+                    CONTROL_REQUESTS.fetch_xor(TOGGLE_ENABLED, Ordering::Relaxed);
+                }
+                return 0;
+            }
+            TRAY_CALLBACK if l as u32 & 0xffff == WM_CONTEXTMENU => {
                 let menu = CreatePopupMenu();
                 if menu.is_null() {
                     return 0;
                 }
+                let minimized = MINIMIZED_WINDOWS.lock().unwrap().clone();
+                append_minimized_menu(menu, &minimized);
+                AppendMenuW(menu, MF_SEPARATOR, 0, std::ptr::null());
                 let paused = STOPPING.load(Ordering::Relaxed);
                 let flags = if paused && RECOVERY_PENDING.load(Ordering::Relaxed) {
                     MF_STRING | MF_GRAYED
+                } else if !paused {
+                    MF_STRING | MF_CHECKED
                 } else {
                     MF_STRING
                 };
@@ -1207,7 +1859,7 @@ unsafe extern "system" fn tray_proc(hwnd: HWND, message: u32, w: WPARAM, l: LPAR
                     menu,
                     flags,
                     if paused { ENABLE } else { PAUSE } as usize,
-                    if paused { w!("&Enable") } else { w!("&Pause") },
+                    w!("&Enable"),
                 );
                 let affected = RECOVERY_WINDOWS.lock().unwrap();
                 if !affected.is_empty() {
@@ -1234,7 +1886,7 @@ unsafe extern "system" fn tray_proc(hwnd: HWND, message: u32, w: WPARAM, l: LPAR
                 );
                 AppendMenuW(menu, MF_SEPARATOR, 0, std::ptr::null());
                 AppendMenuW(menu, MF_STRING, SETTINGS as usize, w!("&Options..."));
-                AppendMenuW(menu, MF_STRING, ABOUT as usize, w!("&About WinRoll RS"));
+                AppendMenuW(menu, MF_STRING, ABOUT as usize, w!("&About..."));
                 AppendMenuW(menu, MF_STRING, EXIT as usize, w!("E&xit"));
                 // Version 4 supplies the icon anchor for keyboard as well as mouse activation.
                 let x = w as i16 as i32;
@@ -1252,6 +1904,7 @@ unsafe extern "system" fn tray_proc(hwnd: HWND, message: u32, w: WPARAM, l: LPAR
                 DestroyMenu(menu);
                 PostMessageW(hwnd, WM_NULL, 0, 0);
                 tray_icon(hwnd, NIM_SETFOCUS);
+                restore_minimized_selection(action, &minimized);
                 if action == ABOUT {
                     show_auxiliary(hwnd, false);
                 }
@@ -1312,6 +1965,18 @@ pub fn run() -> Result<(), String> {
         return self_test(true);
     }
     let mut manager = Manager::new()?;
+    TRANSPARENCY.store(
+        crate::transparency_settings::load().map_err(|error| error.to_string())?,
+        Ordering::Relaxed,
+    );
+    IGNORE_MIDDLE.store(
+        crate::transparency_settings::load_ignore_middle().map_err(|error| error.to_string())?,
+        Ordering::Relaxed,
+    );
+    MINIMIZE_AS_MENU.store(
+        crate::transparency_settings::load_minimize_as_menu().map_err(|error| error.to_string())?,
+        Ordering::Relaxed,
+    );
     // Keep the experiment's mutex name so an old controller cannot run alongside the tray build.
     let mutex = unsafe { CreateMutexW(null_mut(), 0, w!("Local\\WinRoll-RS.Experiment")) };
     if mutex.is_null() {
@@ -1374,13 +2039,16 @@ pub fn run() -> Result<(), String> {
         return Err("Cannot install mouse hook".into());
     }
     let tray_key = tray as isize;
+    manager.tray_owner = tray_key;
     let worker = thread::spawn(move || {
-        crate::accessibility::initialize();
         loop {
             let requests = CONTROL_REQUESTS.swap(0, Ordering::Relaxed);
-            if requests != 0 {
+            if requests & RECREATE_TRAY != 0 {
+                manager.recreate_hidden_icons();
+            }
+            if requests & !RECREATE_TRAY != 0 {
                 // A stop request wins over Enable if multiple actions arrive while restoring.
-                let action = [EXIT, PAUSE, UNROLL_ALL, ENABLE]
+                let action = [EXIT, PAUSE, UNROLL_ALL, ENABLE, TOGGLE_ENABLED]
                     .into_iter()
                     .find(|action| requests & action != 0)
                     .unwrap();
@@ -1391,6 +2059,13 @@ pub fn run() -> Result<(), String> {
                     PostMessageW(tray_key as HWND, TRAY_UPDATE, 0, 0);
                 }
             }
+            let restore = std::mem::take(&mut *RESTORE_TRAY_REQUESTS.lock().unwrap());
+            let restored_hidden = !restore.is_empty();
+            for id in restore {
+                manager.restore_hidden(id, true);
+            }
+            let hidden_changed = manager.clean_hidden() || restored_hidden;
+            manager.publish_hidden_menu();
             // Closing a rolled window needs no further user action to release its state.
             let closed: Vec<_> = manager
                 .windows
@@ -1398,9 +2073,29 @@ pub fn run() -> Result<(), String> {
                 .filter(|(_, saved)| !manager.owns(saved))
                 .map(|(key, _)| *key)
                 .collect();
-            let changed = !closed.is_empty();
+            let mut changed = hidden_changed || !closed.is_empty();
             for key in closed {
                 manager.windows.remove(&key);
+            }
+            let closed: Vec<_> = manager
+                .topmost
+                .iter()
+                .filter(|(_, (target, marker, _))| !manager.owns_topmost(*target, *marker))
+                .map(|(key, _)| *key)
+                .collect();
+            changed |= !closed.is_empty();
+            for key in closed {
+                manager.topmost.remove(&key);
+            }
+            let stale: Vec<_> = manager
+                .transparent
+                .iter()
+                .filter(|(_, saved)| !manager.owns_transparency(**saved))
+                .map(|(key, _)| *key)
+                .collect();
+            changed |= !stale.is_empty();
+            for key in stale {
+                manager.transparent.remove(&key);
             }
             if changed && RECOVERY_PENDING.load(Ordering::Relaxed) {
                 manager.publish_recovery();
@@ -1415,11 +2110,12 @@ pub fn run() -> Result<(), String> {
                 manager.move_rolled(position);
             }
             manager.maintain_rolled_size();
-            let rolled = !manager.windows.is_empty();
-            if HAS_ROLLED_WINDOWS.swap(rolled, Ordering::Relaxed) != rolled {
-                unsafe { PostMessageW(tray_key as HWND, TRAY_UPDATE, 0, 0) };
-            }
-            if manager.exit_pending && manager.windows.is_empty() {
+            if manager.exit_pending
+                && manager.windows.is_empty()
+                && manager.topmost.is_empty()
+                && manager.transparent.is_empty()
+                && manager.hidden.is_empty()
+            {
                 break;
             }
             let wait = if DRAG_ACTIVE.load(Ordering::Relaxed) {
@@ -1428,12 +2124,12 @@ pub fn run() -> Result<(), String> {
                 50
             };
             match receiver.recv_timeout(Duration::from_millis(wait)) {
-                Ok(Command::Probe(point, reply)) => {
+                Ok(Command::ProbeRight(point, reply)) => {
                     let started = Instant::now();
                     let target = if STOPPING.load(Ordering::Relaxed) {
                         None
                     } else {
-                        manager.probe(point)
+                        manager.probe_hits(point, &[HTCAPTION, HTCLOSE])
                     };
                     let _ = reply.try_send(target);
                     log(format!(
@@ -1445,16 +2141,25 @@ pub fn run() -> Result<(), String> {
                 Ok(Command::Toggle(target)) if !STOPPING.load(Ordering::Relaxed) => {
                     manager.toggle(target)
                 }
-                Ok(Command::ProbeClose(point, reply)) => {
+                Ok(Command::ProbeMiddle(point, reply)) => {
                     let target = if STOPPING.load(Ordering::Relaxed) {
                         None
                     } else {
-                        manager.probe_hit(point, HTCLOSE)
+                        manager.probe_hits(point, &[HTCAPTION, HTCLOSE, HTMINBUTTON])
                     };
                     let _ = reply.try_send(target);
                 }
                 Ok(Command::ToggleTopmost(target)) if !STOPPING.load(Ordering::Relaxed) => {
                     manager.toggle_topmost(target)
+                }
+                Ok(Command::MinimizeToTray(target)) if !STOPPING.load(Ordering::Relaxed) => {
+                    manager.minimize_to_tray(target, MINIMIZE_AS_MENU.load(Ordering::Relaxed))
+                }
+                Ok(Command::ToggleTransparency(target)) if !STOPPING.load(Ordering::Relaxed) => {
+                    manager.toggle_transparency(target)
+                }
+                Ok(Command::SendToBack(target)) if !STOPPING.load(Ordering::Relaxed) => {
+                    manager.send_to_back(target)
                 }
                 Ok(Command::ProbeRolled(point, reply)) => {
                     let target = manager.probe(point).filter(|target| {
@@ -1516,6 +2221,10 @@ fn pump_until_restored() {
             }
             let options = OPTIONS_WINDOW.load(Ordering::Relaxed) as HWND;
             if !options.is_null() && IsDialogMessageW(options, &msg) != 0 {
+                continue;
+            }
+            let about = ABOUT_WINDOW.load(Ordering::Relaxed) as HWND;
+            if !about.is_null() && IsDialogMessageW(about, &msg) != 0 {
                 continue;
             }
             TranslateMessage(&msg);
@@ -1664,6 +2373,15 @@ fn self_test(interactive: bool) -> Result<(), String> {
             x: initial.right - 25,
             y: point.y,
         };
+        for (point, expected) in [(point, HTCAPTION), (close_point, HTCLOSE)] {
+            if manager
+                .probe_hits(point, &[HTCAPTION, HTCLOSE])
+                .map(|(_, hit)| hit)
+                != Some(expected)
+            {
+                return Err("Right-click probe did not distinguish caption from Close".into());
+            }
+        }
         if manager.probe_hit(point, HTCLOSE).is_some()
             || manager
                 .probe_hit(
@@ -1678,13 +2396,18 @@ fn self_test(interactive: bool) -> Result<(), String> {
         {
             return Err("Close and caption gestures did not reject other hit regions".into());
         }
-        self_test_topmost(&manager, close_point, false)?;
-        self_test_topmost(&manager, close_point, true)?;
+        self_test_topmost_exit(close_point)?;
+        self_test_transparency(point)?;
+        self_test_topmost(&mut manager, close_point, false)?;
+        self_test_topmost(&mut manager, close_point, true)?;
+        self_test_send_to_back(&manager, close_point, second_hwnd, false)?;
+        self_test_send_to_back(&manager, close_point, second_hwnd, true)?;
         let mut stale = manager
             .probe_hit(close_point, HTCLOSE)
             .ok_or("Close unavailable")?;
         stale.pid = 0;
         manager.toggle_topmost(stale);
+        manager.send_to_back(stale);
         if unsafe { GetWindowLongW(hwnd, GWL_EXSTYLE) } as u32 & WS_EX_TOPMOST == 0 {
             return Err("Stale target changed topmost state".into());
         }
@@ -1734,20 +2457,12 @@ fn self_test(interactive: bool) -> Result<(), String> {
             log(format!("PASS native cycle {cycle}/20"));
         }
         manager.toggle(manager.probe(point).ok_or("Fixture caption unavailable")?);
-        self_test_topmost(&manager, close_point, false)?;
-        self_test_topmost(&manager, close_point, true)?;
-        manager.windows.get_mut(&key).unwrap().fork = true;
-        manager.maintain_rolled_size();
-        if rect(hwnd).map(dimensions) != Some((800, rolled_height(dpi, true)))
-            || !manager.restore_all()
-            || rect(hwnd).map(bounds) != Some(bounds(initial))
-        {
-            return Err("Fork-sized caption did not stay rolled or restore".into());
+        self_test_topmost(&mut manager, close_point, false)?;
+        self_test_topmost(&mut manager, close_point, true)?;
+        self_test_send_to_back(&manager, close_point, second_hwnd, true)?;
+        if !manager.restore_all() || rect(hwnd).map(bounds) != Some(bounds(initial)) {
+            return Err("Rolled caption gesture checks did not restore geometry".into());
         }
-        log(format!(
-            "PASS Fork-sized caption height={}",
-            rolled_height(dpi, true)
-        ));
         self_test_dpi_move(&mut manager, key, point)?;
         let mut monitor_info = MONITORINFO {
             cbSize: size_of::<MONITORINFO>() as u32,
@@ -1774,7 +2489,7 @@ fn self_test(interactive: bool) -> Result<(), String> {
             y: moved_y,
             finished: true,
         });
-        if dimensions(rect(hwnd).ok_or("Fixture closed")?) != (800, rolled_height(dpi, false))
+        if dimensions(rect(hwnd).ok_or("Fixture closed")?) != (800, rolled_height(dpi))
             || !manager.restore_all()
             || rect(hwnd).map(bounds) != Some([moved_x, moved_y, moved_x + 800, moved_y + 600])
         {
@@ -1791,7 +2506,7 @@ fn self_test(interactive: bool) -> Result<(), String> {
                 .ok_or("Moved fixture caption unavailable")?,
         );
         let current_dpi = unsafe { GetDpiForWindow(hwnd) };
-        let expected_height = rolled_height(current_dpi, false);
+        let expected_height = rolled_height(current_dpi);
         manager.windows.get_mut(&key).unwrap().dpi = current_dpi + 1;
         if !manager.resize(key, moved_x, moved_y, 800, expected_height + 10) {
             return Err("Could not simulate stale rolled caption height".into());
@@ -2023,8 +2738,9 @@ fn self_test(interactive: bool) -> Result<(), String> {
             x: maximized.right - 25,
             y: maximized.top + caption_height(unsafe { GetDpiForWindow(hwnd) }) / 2,
         };
-        self_test_topmost(&manager, maximized_close, false)?;
-        self_test_topmost(&manager, maximized_close, true)?;
+        self_test_topmost(&mut manager, maximized_close, false)?;
+        self_test_topmost(&mut manager, maximized_close, true)?;
+        self_test_send_to_back(&manager, maximized_close, second_hwnd, true)?;
         unsafe {
             PostMessageW(hwnd, WM_SYSCOMMAND, SC_RESTORE as usize, 0);
         }
@@ -2090,11 +2806,130 @@ fn self_test(interactive: bool) -> Result<(), String> {
         .join()
         .map_err(|_| "Second fixture thread panicked")?;
     result?;
+    tray_windows::self_test()?;
     self_test_options()?;
     self_test_menu_exit()
 }
 
-fn self_test_topmost(manager: &Manager, point: POINT, expected: bool) -> Result<(), String> {
+fn self_test_transparency(point: POINT) -> Result<(), String> {
+    let mut manager = Manager::new()?;
+    let target = manager
+        .probe(point)
+        .ok_or("Transparency fixture caption not found")?;
+    let hwnd = target.hwnd as HWND;
+    let original_percent = TRANSPARENCY.load(Ordering::Relaxed);
+    let result = (|| -> Result<(), String> {
+        for percent in (0..=100).step_by(10) {
+            TRANSPARENCY.store(percent, Ordering::Relaxed);
+            manager.toggle_transparency(target);
+            unsafe {
+                let mut alpha = 255;
+                let mut flags = 0;
+                if percent > 0
+                    && (GetLayeredWindowAttributes(hwnd, null_mut(), &mut alpha, &mut flags) == 0
+                        || alpha != transparency_alpha(percent)
+                        || flags & LWA_ALPHA == 0)
+                {
+                    return Err(format!("Transparency {percent}% was not applied"));
+                }
+            }
+            if percent > 0 {
+                manager.toggle_transparency(target);
+            }
+            if !manager.transparent.is_empty()
+                || unsafe { GetWindowLongW(hwnd, GWL_EXSTYLE) } as u32 & WS_EX_LAYERED != 0
+            {
+                return Err("Transparency toggle did not restore non-layered style".into());
+            }
+        }
+        // Preserve a pre-existing alpha and color key, including on Exit.
+        unsafe {
+            let style = GetWindowLongW(hwnd, GWL_EXSTYLE) as u32;
+            SetWindowLongW(hwnd, GWL_EXSTYLE, (style | WS_EX_LAYERED) as i32);
+            if SetLayeredWindowAttributes(hwnd, 0x123456, 201, LWA_ALPHA | LWA_COLORKEY) == 0 {
+                return Err("Cannot configure original layered fixture".into());
+            }
+        }
+        TRANSPARENCY.store(100, Ordering::Relaxed);
+        manager.toggle_transparency(target);
+        manager.control(PAUSE);
+        if manager.transparent.is_empty() {
+            return Err("Pause discarded transparency".into());
+        }
+        if !manager.control(EXIT) {
+            return Err("Exit did not restore transparency".into());
+        }
+        unsafe {
+            let mut color = 0;
+            let mut alpha = 0;
+            let mut flags = 0;
+            if GetLayeredWindowAttributes(hwnd, &mut color, &mut alpha, &mut flags) == 0
+                || color != 0x123456
+                || alpha != 201
+                || flags != LWA_ALPHA | LWA_COLORKEY
+            {
+                return Err("Original layered attributes were not restored".into());
+            }
+        }
+        Ok(())
+    })();
+    manager.restore_all_transparency();
+    unsafe {
+        let style = GetWindowLongW(hwnd, GWL_EXSTYLE) as u32;
+        SetWindowLongW(hwnd, GWL_EXSTYLE, (style & !WS_EX_LAYERED) as i32);
+    }
+    TRANSPARENCY.store(original_percent, Ordering::Relaxed);
+    STOPPING.store(false, Ordering::Relaxed);
+    result?;
+    log("PASS transparency 0–100%, toggle, Pause and original layered attributes on Exit");
+    Ok(())
+}
+
+fn self_test_topmost_exit(point: POINT) -> Result<(), String> {
+    let mut manager = Manager::new()?;
+    let target = manager
+        .probe_hit(point, HTCLOSE)
+        .ok_or("Fixture Close unavailable")?;
+    let hwnd = target.hwnd as HWND;
+    for original in [false, true] {
+        unsafe {
+            SetWindowPos(
+                hwnd,
+                if original {
+                    HWND_TOPMOST
+                } else {
+                    HWND_NOTOPMOST
+                },
+                0,
+                0,
+                0,
+                0,
+                SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE,
+            );
+        }
+        self_test_topmost(&mut manager, point, !original)?;
+        manager.control(PAUSE);
+        manager.control(UNROLL_ALL);
+        if (unsafe { GetWindowLongW(hwnd, GWL_EXSTYLE) } as u32 & WS_EX_TOPMOST != 0) == original {
+            return Err("Pause or Unroll all changed Always on Top".into());
+        }
+        manager.control(ENABLE);
+        self_test_topmost(&mut manager, point, original)?;
+        self_test_topmost(&mut manager, point, !original)?;
+        if !manager.control(EXIT) {
+            return Err("Exit did not complete topmost restoration".into());
+        }
+        if (unsafe { GetWindowLongW(hwnd, GWL_EXSTYLE) } as u32 & WS_EX_TOPMOST != 0) != original {
+            return Err("Exit left the window's Always on Top state changed".into());
+        }
+        manager.exit_pending = false;
+        manager.control(ENABLE);
+    }
+    log("PASS Exit restores original Always on Top state");
+    Ok(())
+}
+
+fn self_test_topmost(manager: &mut Manager, point: POINT, expected: bool) -> Result<(), String> {
     let target = manager
         .probe_hit(point, HTCLOSE)
         .ok_or("Fixture Close button was not eligible")?;
@@ -2120,7 +2955,158 @@ fn self_test_topmost(manager: &Manager, point: POINT, expected: bool) -> Result<
     Ok(())
 }
 
+fn self_test_send_to_back(
+    manager: &Manager,
+    point: POINT,
+    other: HWND,
+    topmost: bool,
+) -> Result<(), String> {
+    let target = manager
+        .probe_hit(point, HTCLOSE)
+        .ok_or("Close unavailable")?;
+    let hwnd = target.hwnd as HWND;
+    let flags = SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE | SWP_NOOWNERZORDER | SWP_ASYNCWINDOWPOS;
+    let behind_other = || {
+        let mut next = unsafe { GetWindow(other, GW_HWNDNEXT) };
+        while !next.is_null() && next != hwnd {
+            next = unsafe { GetWindow(next, GW_HWNDNEXT) };
+        }
+        next == hwnd
+    };
+    unsafe {
+        SetWindowPos(other, HWND_NOTOPMOST, 0, 0, 0, 0, flags);
+        SetWindowPos(
+            hwnd,
+            if topmost {
+                HWND_TOPMOST
+            } else {
+                HWND_NOTOPMOST
+            },
+            0,
+            0,
+            0,
+            0,
+            flags,
+        );
+        SetWindowPos(hwnd, HWND_TOP, 0, 0, 0, 0, flags);
+    }
+    let deadline = Instant::now() + Duration::from_secs(1);
+    loop {
+        let ready = unsafe {
+            (GetWindowLongW(hwnd, GWL_EXSTYLE) as u32 & WS_EX_TOPMOST != 0) == topmost
+                && GetWindowLongW(other, GWL_EXSTYLE) as u32 & WS_EX_TOPMOST == 0
+                && GetAncestor(WindowFromPoint(point), GA_ROOT) == hwnd
+        };
+        if ready && !behind_other() {
+            break;
+        }
+        if Instant::now() >= deadline {
+            return Err("Send to Back fixture setup did not settle".into());
+        }
+        thread::sleep(Duration::from_millis(10));
+    }
+    let foreground = unsafe { GetForegroundWindow() };
+    manager.send_to_back(target);
+    let deadline = Instant::now() + Duration::from_secs(1);
+    loop {
+        if behind_other()
+            && unsafe { GetWindowLongW(hwnd, GWL_EXSTYLE) } as u32 & WS_EX_TOPMOST == 0
+        {
+            break;
+        }
+        if Instant::now() >= deadline {
+            return Err("Send to Back did not lower the fixture or clear Always on Top".into());
+        }
+        thread::sleep(Duration::from_millis(10));
+    }
+    if rect(hwnd).map(bounds) != Some(bounds(target.rect))
+        || !visible_caption(hwnd)
+        || unsafe { GetForegroundWindow() } != foreground
+    {
+        return Err("Send to Back changed geometry, visibility or activation".into());
+    }
+    // Restore fixture order so subsequent pointer probes still reach its caption.
+    unsafe {
+        SetWindowPos(other, HWND_TOPMOST, 0, 0, 0, 0, flags);
+        SetWindowPos(hwnd, HWND_TOPMOST, 0, 0, 0, 0, flags);
+    }
+    let deadline = Instant::now() + Duration::from_secs(1);
+    loop {
+        let ready = unsafe {
+            GetWindowLongW(hwnd, GWL_EXSTYLE) as u32 & WS_EX_TOPMOST != 0
+                && GetWindowLongW(other, GWL_EXSTYLE) as u32 & WS_EX_TOPMOST != 0
+                && GetAncestor(WindowFromPoint(point), GA_ROOT) == hwnd
+        };
+        if ready && !behind_other() {
+            break;
+        }
+        if Instant::now() >= deadline {
+            return Err("Send to Back fixture cleanup did not settle".into());
+        }
+        thread::sleep(Duration::from_millis(10));
+    }
+    log(format!(
+        "PASS Close-button Send to Back (initial topmost={topmost}) with unchanged geometry and activation"
+    ));
+    Ok(())
+}
+
+#[test]
+fn about_repository_hyperlink() {
+    unsafe {
+        show_auxiliary(null_mut(), false);
+        let hwnd = ABOUT_WINDOW.load(Ordering::Relaxed) as HWND;
+        assert!(!hwnd.is_null(), "Cannot create About window");
+        let link = GetDlgItem(hwnd, 2);
+        let mut class = [0u16; 32];
+        let length = GetClassNameW(link, class.as_mut_ptr(), class.len() as i32);
+        let mut item = LITEM {
+            mask: LIF_ITEMINDEX | LIF_URL | LIF_STATE,
+            iLink: 0,
+            stateMask: LIS_ENABLED,
+            ..Default::default()
+        };
+        let found = SendMessageW(link, LM_GETITEM, 0, (&mut item as *mut LITEM) as isize);
+        let tab = MSG {
+            hwnd: GetDlgItem(hwnd, 1),
+            message: WM_KEYDOWN,
+            wParam: 9,
+            ..Default::default()
+        };
+        SetFocus(tab.hwnd);
+        let navigated = IsDialogMessageW(hwnd, &tab);
+        let focused = windows_sys::Win32::UI::Input::KeyboardAndMouse::GetFocus() == link;
+        DestroyWindow(hwnd);
+        assert_eq!(
+            String::from_utf16_lossy(&class[..length as usize]),
+            "SysLink"
+        );
+        assert_ne!(found, 0);
+        assert_ne!(item.state & LIS_ENABLED, 0);
+        let length = item.szUrl.iter().position(|c| *c == 0).unwrap();
+        assert_eq!(
+            String::from_utf16_lossy(&item.szUrl[..length]),
+            "https://github.com/jedipi/WinRoll-RS"
+        );
+        assert!(
+            navigated != 0 && focused,
+            "Hyperlink is not keyboard accessible"
+        );
+    }
+}
+
+#[cfg_attr(test, test)]
 fn self_test_options() -> Result<(), String> {
+    let original = MINIMIZE_AS_MENU.load(Ordering::Relaxed);
+    let result = [false, true].into_iter().try_for_each(|as_menu| {
+        MINIMIZE_AS_MENU.store(as_menu, Ordering::Relaxed);
+        check_options_window()
+    });
+    MINIMIZE_AS_MENU.store(original, Ordering::Relaxed);
+    result
+}
+
+fn check_options_window() -> Result<(), String> {
     let enabled = crate::startup::enabled().map_err(|error| error.to_string())?;
     // Read the real preference, but never click the checkbox or change startup in this UI check.
     unsafe {
@@ -2132,6 +3118,34 @@ fn self_test_options() -> Result<(), String> {
         let result = (|| -> Result<(), String> {
             let checkbox = GetDlgItem(hwnd, 3);
             let close = GetDlgItem(hwnd, 2);
+            let slider = GetDlgItem(hwnd, 4);
+            let ignore_middle = GetDlgItem(hwnd, 7);
+            let as_icon = GetDlgItem(hwnd, 10);
+            let as_menu = GetDlgItem(hwnd, 11);
+            let menu_preference = MINIMIZE_AS_MENU.load(Ordering::Relaxed);
+            if as_icon.is_null()
+                || as_menu.is_null()
+                || (SendMessageW(as_icon, BM_GETCHECK, 0, 0) == BST_CHECKED as isize)
+                    == menu_preference
+                || (SendMessageW(as_menu, BM_GETCHECK, 0, 0) == BST_CHECKED as isize)
+                    != menu_preference
+            {
+                return Err("Options does not reflect the minimize to tray preference".into());
+            }
+            if ignore_middle.is_null()
+                || (SendMessageW(ignore_middle, BM_GETCHECK, 0, 0) == BST_CHECKED as isize)
+                    != IGNORE_MIDDLE.load(Ordering::Relaxed)
+            {
+                return Err("Options does not reflect the ignore middle mouse preference".into());
+            }
+            if slider.is_null()
+                || SendMessageW(slider, TBM_GETRANGEMIN, 0, 0) != 0
+                || SendMessageW(slider, TBM_GETRANGEMAX, 0, 0) != 10
+                || SendMessageW(slider, TBM_GETPOS, 0, 0)
+                    != (TRANSPARENCY.load(Ordering::Relaxed) / 10) as isize
+            {
+                return Err("Options transparency slider has incorrect range or preference".into());
+            }
             if checkbox.is_null()
                 || close.is_null()
                 || windows_sys::Win32::UI::Input::KeyboardAndMouse::GetFocus() != checkbox
@@ -2150,6 +3164,31 @@ fn self_test_options() -> Result<(), String> {
                 wParam: 9, // VK_TAB
                 ..Default::default()
             };
+            if IsDialogMessageW(hwnd, &tab) == 0
+                || windows_sys::Win32::UI::Input::KeyboardAndMouse::GetFocus() != ignore_middle
+            {
+                return Err("Options keyboard navigation did not focus ignore middle mouse".into());
+            }
+            let tab = MSG {
+                hwnd: ignore_middle,
+                ..tab
+            };
+            if IsDialogMessageW(hwnd, &tab) == 0
+                || windows_sys::Win32::UI::Input::KeyboardAndMouse::GetFocus() != slider
+            {
+                return Err("Options keyboard navigation did not focus transparency".into());
+            }
+            let tab = MSG {
+                hwnd: slider,
+                ..tab
+            };
+            let radio = if menu_preference { as_menu } else { as_icon };
+            if IsDialogMessageW(hwnd, &tab) == 0
+                || windows_sys::Win32::UI::Input::KeyboardAndMouse::GetFocus() != radio
+            {
+                return Err("Options keyboard navigation did not focus minimize to tray".into());
+            }
+            let tab = MSG { hwnd: radio, ..tab };
             if IsDialogMessageW(hwnd, &tab) == 0
                 || windows_sys::Win32::UI::Input::KeyboardAndMouse::GetFocus() != close
             {
@@ -2171,6 +3210,44 @@ fn self_test_options() -> Result<(), String> {
 }
 
 fn self_test_menu_exit() -> Result<(), String> {
+    let mut manager = Manager::new()?;
+    STOPPING.store(false, Ordering::Relaxed);
+    CONTROL_REQUESTS.store(0, Ordering::Relaxed);
+    for (event, paused) in [
+        (NIN_SELECT, true),
+        (NIN_SELECT, false),
+        (NIN_KEYSELECT, true),
+        (NIN_KEYSELECT, false),
+    ] {
+        unsafe {
+            tray_proc(null_mut(), TRAY_CALLBACK, 0, ((1 << 16) | event) as isize);
+        }
+        let action = CONTROL_REQUESTS.swap(0, Ordering::Relaxed);
+        if action != TOGGLE_ENABLED {
+            return Err("Tray activation did not request a toggle".into());
+        }
+        manager.control(action);
+        if STOPPING.load(Ordering::Relaxed) != paused {
+            return Err("Tray activation did not toggle enabled state".into());
+        }
+    }
+    for _ in 0..2 {
+        unsafe {
+            tray_proc(null_mut(), TRAY_CALLBACK, 0, NIN_SELECT as isize);
+        }
+    }
+    if CONTROL_REQUESTS.swap(0, Ordering::Relaxed) != 0 {
+        return Err("Two queued tray clicks did not cancel".into());
+    }
+    RECOVERY_PENDING.store(true, Ordering::Relaxed);
+    unsafe {
+        tray_proc(null_mut(), TRAY_CALLBACK, 0, NIN_SELECT as isize);
+    }
+    RECOVERY_PENDING.store(false, Ordering::Relaxed);
+    if CONTROL_REQUESTS.swap(0, Ordering::Relaxed) != 0 {
+        return Err("Tray click bypassed pending recovery".into());
+    }
+    log("PASS tray left-click and keyboard toggle, rapid-click parity and recovery guard");
     // Exercise the real native modal menu and outer message loop, with no target windows at risk.
     unsafe {
         let class = WNDCLASSW {
@@ -2321,9 +3398,9 @@ fn self_test_dpi_move(manager: &mut Manager, key: isize, point: POINT) -> Result
         log(format!(
             "DPI MOVE dpi={dpi} rect={:?} expected_height={}",
             bounds(current),
-            rolled_height(dpi, false)
+            rolled_height(dpi)
         ));
-        if dimensions(current) != (dimensions(initial).0, rolled_height(dpi, false)) {
+        if dimensions(current) != (dimensions(initial).0, rolled_height(dpi)) {
             return Err(
                 "Unfinished mixed-DPI drag changed saved width or exposed fixture client area"
                     .into(),
@@ -2364,7 +3441,7 @@ fn self_test_dpi_move(manager: &mut Manager, key: isize, point: POINT) -> Result
                 ));
             }
             if rect(hwnd).map(dimensions)
-                != Some((dimensions(initial).0, rolled_height(previous_dpi, false)))
+                != Some((dimensions(initial).0, rolled_height(previous_dpi)))
             {
                 return Err(
                     "Held boundary position did not settle at saved width and caption height"
@@ -2420,6 +3497,19 @@ unsafe extern "system" fn fixture_proc(hwnd: HWND, message: u32, w: WPARAM, l: L
                 },
             );
             return 0;
+        }
+        if message == WM_WINDOWPOSCHANGING {
+            let position = &mut *(l as *mut WINDOWPOS);
+            if position.flags & SWP_HIDEWINDOW != 0
+                && FIXTURE_DELAYS_HIDE
+                    .compare_exchange(hwnd as isize, 0, Ordering::Relaxed, Ordering::Relaxed)
+                    .is_ok()
+            {
+                thread::sleep(Duration::from_millis(600));
+            }
+            if FIXTURE_REFUSES_SHOW.load(Ordering::Relaxed) == hwnd as isize {
+                position.flags &= !SWP_SHOWWINDOW;
+            }
         }
         if message == WM_WINDOWPOSCHANGED
             && FIXTURE_REFUSES_EXPANSION.load(Ordering::Relaxed) == hwnd as isize
