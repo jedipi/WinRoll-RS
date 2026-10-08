@@ -1247,11 +1247,20 @@ unsafe extern "system" fn about_proc(hwnd: HWND, message: u32, w: WPARAM, l: LPA
             WM_CREATE => {
                 let dpi = GetDpiForWindow(hwnd) as i32;
                 let scale = |n| n * dpi / 96;
+                let controls = INITCOMMONCONTROLSEX {
+                    dwSize: size_of::<INITCOMMONCONTROLSEX>() as u32,
+                    dwICC: ICC_LINK_CLASS,
+                };
+                if InitCommonControlsEx(&controls) == 0 {
+                    return -1;
+                }
                 let link = CreateWindowExW(
                     0,
-                    w!("BUTTON"),
-                    w!("https://github.com/jedipi/WinRoll-RS"),
-                    WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_FLAT as u32,
+                    WC_LINK,
+                    w!(
+                        "<a href=\"https://github.com/jedipi/WinRoll-RS\">https://github.com/jedipi/WinRoll-RS</a>"
+                    ),
+                    WS_CHILD | WS_VISIBLE | WS_TABSTOP,
                     scale(20),
                     scale(104),
                     scale(280),
@@ -1261,6 +1270,9 @@ unsafe extern "system" fn about_proc(hwnd: HWND, message: u32, w: WPARAM, l: LPA
                     GetModuleHandleW(null_mut()),
                     null_mut(),
                 );
+                if link.is_null() {
+                    return -1;
+                }
                 SendMessageW(
                     link,
                     WM_SETFONT,
@@ -1325,7 +1337,13 @@ unsafe extern "system" fn about_proc(hwnd: HWND, message: u32, w: WPARAM, l: LPA
                 DestroyWindow(hwnd);
                 return 0;
             }
-            WM_COMMAND if w & 0xffff == 2 && w >> 16 == BN_CLICKED as usize => {
+            WM_NOTIFY if l != 0 => {
+                let notification = &*(l as *const NMHDR);
+                if notification.hwndFrom != GetDlgItem(hwnd, 2)
+                    || !matches!(notification.code, NM_CLICK | NM_RETURN)
+                {
+                    return DefWindowProcW(hwnd, message, w, l);
+                }
                 ShellExecuteW(
                     hwnd,
                     w!("open"),
@@ -3031,6 +3049,50 @@ fn self_test_send_to_back(
         "PASS Close-button Send to Back (initial topmost={topmost}) with unchanged geometry and activation"
     ));
     Ok(())
+}
+
+#[test]
+fn about_repository_hyperlink() {
+    unsafe {
+        show_auxiliary(null_mut(), false);
+        let hwnd = ABOUT_WINDOW.load(Ordering::Relaxed) as HWND;
+        assert!(!hwnd.is_null(), "Cannot create About window");
+        let link = GetDlgItem(hwnd, 2);
+        let mut class = [0u16; 32];
+        let length = GetClassNameW(link, class.as_mut_ptr(), class.len() as i32);
+        let mut item = LITEM {
+            mask: LIF_ITEMINDEX | LIF_URL | LIF_STATE,
+            iLink: 0,
+            stateMask: LIS_ENABLED,
+            ..Default::default()
+        };
+        let found = SendMessageW(link, LM_GETITEM, 0, (&mut item as *mut LITEM) as isize);
+        let tab = MSG {
+            hwnd: GetDlgItem(hwnd, 1),
+            message: WM_KEYDOWN,
+            wParam: 9,
+            ..Default::default()
+        };
+        SetFocus(tab.hwnd);
+        let navigated = IsDialogMessageW(hwnd, &tab);
+        let focused = windows_sys::Win32::UI::Input::KeyboardAndMouse::GetFocus() == link;
+        DestroyWindow(hwnd);
+        assert_eq!(
+            String::from_utf16_lossy(&class[..length as usize]),
+            "SysLink"
+        );
+        assert_ne!(found, 0);
+        assert_ne!(item.state & LIS_ENABLED, 0);
+        let length = item.szUrl.iter().position(|c| *c == 0).unwrap();
+        assert_eq!(
+            String::from_utf16_lossy(&item.szUrl[..length]),
+            "https://github.com/jedipi/WinRoll-RS"
+        );
+        assert!(
+            navigated != 0 && focused,
+            "Hyperlink is not keyboard accessible"
+        );
+    }
 }
 
 #[cfg_attr(test, test)]
