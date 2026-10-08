@@ -47,7 +47,6 @@ I want WinRoll RS to:
 - Avoid DLL injection whenever possible
 - Use modern Win32 APIs
 - Keep memory and CPU usage very low
-- Maintain a small and understandable codebase
 
 Windows XP, Vista, 7, 8, and 32-bit Windows are outside the project's scope.
 
