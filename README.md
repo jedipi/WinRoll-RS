@@ -1,3 +1,5 @@
+[English](README.md) | [繁體中文](README-HANT.md) | [简体中文](README-HANS.md)
+
 # WinRoll RS
 
 WinRoll RS is a Rust reimplementation of WinRoll 2.0 for Windows 10 and Windows 11.

@@ -1,3 +1,5 @@
+[English](README.md) | [繁體中文](README-HANT.md) | [简体中文](README-HANS.md)
+
 # WinRoll RS
 
 WinRoll RS 用 Rust 重新打造 WinRoll 2.0，适用于 Windows 10 和 Windows 11。
