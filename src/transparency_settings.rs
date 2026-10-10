@@ -28,6 +28,25 @@ pub fn load_ignore_middle() -> io::Result<bool> {
     load_ignore_middle_from(SETTINGS_KEY)
 }
 
+pub fn load_sound_enabled() -> io::Result<bool> {
+    load_sound_enabled_from(SETTINGS_KEY)
+}
+
+pub fn save_sound_enabled(enabled: bool) -> io::Result<()> {
+    save_dword(SETTINGS_KEY, "SoundEnabled", u32::from(enabled))
+}
+
+fn load_sound_enabled_from(key: &str) -> io::Result<bool> {
+    match load_dword(key, "SoundEnabled", 1)? {
+        0 => Ok(false),
+        1 => Ok(true),
+        _ => Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            "Saved sound enabled setting must be 0 or 1.",
+        )),
+    }
+}
+
 pub fn save_ignore_middle(ignore: bool) -> io::Result<()> {
     save_dword(SETTINGS_KEY, "IgnoreMiddleMouseButton", u32::from(ignore))
 }
@@ -167,6 +186,18 @@ fn transparency_setting_round_trip() {
         assert_eq!(load_language_from(&key)?, 1);
         assert_eq!(normalize_preference(u32::MAX), 1);
         assert!(!load_minimize_as_menu_from(&key)?);
+        assert!(load_sound_enabled_from(&key)?);
+        for enabled in [false, true] {
+            save_dword(&key, "SoundEnabled", u32::from(enabled))?;
+            assert_eq!(load_sound_enabled_from(&key)?, enabled);
+        }
+        for invalid in [2, u32::MAX] {
+            save_dword(&key, "SoundEnabled", invalid)?;
+            assert_eq!(
+                load_sound_enabled_from(&key).unwrap_err().kind(),
+                io::ErrorKind::InvalidData
+            );
+        }
         for as_menu in [true, false] {
             save_dword(&key, "MinimizeAsMenu", u32::from(as_menu))?;
             assert_eq!(load_minimize_as_menu_from(&key)?, as_menu);
