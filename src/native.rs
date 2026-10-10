@@ -803,6 +803,7 @@ impl Manager {
                 "ROLL hwnd={:#x} pid={} dpi={} expanded={}x{} rolled={}x{}",
                 target.hwnd, target.pid, dpi, width, old_height, width, height
             ));
+            crate::sound::play(crate::sound::ROLL_UP);
         } else {
             log(format!("FAIL roll hwnd={:#x}; restoring", target.hwnd));
             self.unroll(target.hwnd);
@@ -1041,6 +1042,7 @@ impl Manager {
             }
             self.windows.remove(&key);
             log(format!("UNROLL verified hwnd={key:#x}"));
+            crate::sound::play(crate::sound::ROLL_DOWN);
         } else {
             log(format!(
                 "RECOVERY NEEDED hwnd={key:#x}; use Unroll all or Exit to retry"
@@ -1516,6 +1518,7 @@ fn refresh_options_language(hwnd: HWND) {
         for (id, label) in [
             (3, "&Automatically start with Windows"),
             (7, "&Ignore middle mouse button"),
+            (14, "&Sound effects"),
             (10, "As &icon"),
             (11, "As &menu"),
             (2, "Close"),
@@ -1588,17 +1591,26 @@ unsafe extern "system" fn options_proc(hwnd: HWND, message: u32, w: WPARAM, l: L
                         "As &icon",
                         BS_AUTORADIOBUTTON | WS_GROUP as i32,
                         40,
-                        272,
+                        308,
                         120,
                         24,
                     ),
-                    (11, "As &menu", BS_AUTORADIOBUTTON, 180, 272, 120, 24),
+                    (11, "As &menu", BS_AUTORADIOBUTTON, 180, 308, 120, 24),
+                    (
+                        14,
+                        "&Sound effects",
+                        BS_AUTOCHECKBOX | WS_GROUP as i32,
+                        20,
+                        94,
+                        300,
+                        28,
+                    ),
                     (
                         2,
                         "Close",
                         BS_DEFPUSHBUTTON | WS_GROUP as i32,
                         236,
-                        382,
+                        418,
                         80,
                         28,
                     ),
@@ -1640,7 +1652,7 @@ unsafe extern "system" fn options_proc(hwnd: HWND, message: u32, w: WPARAM, l: L
                         w!("BUTTON"),
                         "Minimize to tray",
                         BS_GROUPBOX as u32,
-                        248,
+                        284,
                         64,
                     ),
                     (
@@ -1648,7 +1660,7 @@ unsafe extern "system" fn options_proc(hwnd: HWND, message: u32, w: WPARAM, l: L
                         w!("BUTTON"),
                         "&Transparency",
                         BS_GROUPBOX as u32,
-                        98,
+                        134,
                         142,
                     ),
                     (
@@ -1656,16 +1668,16 @@ unsafe extern "system" fn options_proc(hwnd: HWND, message: u32, w: WPARAM, l: L
                         TRACKBAR_CLASSW,
                         "Transparency",
                         WS_TABSTOP | TBS_AUTOTICKS,
-                        124,
+                        160,
                         36,
                     ),
-                    (8, w!("STATIC"), "", 0, 164, 20),
+                    (8, w!("STATIC"), "", 0, 200, 20),
                     (
                         6,
                         w!("STATIC"),
                         "Invisible windows: choose Exit in the tray to restore.",
                         0,
-                        190,
+                        226,
                         40,
                     ),
                 ] {
@@ -1711,7 +1723,7 @@ unsafe extern "system" fn options_proc(hwnd: HWND, message: u32, w: WPARAM, l: L
                         wide_text(label).as_ptr(),
                         WS_CHILD | WS_VISIBLE | style,
                         scale(x),
-                        scale(330),
+                        scale(366),
                         scale(width),
                         scale(height),
                         hwnd,
@@ -1730,7 +1742,7 @@ unsafe extern "system" fn options_proc(hwnd: HWND, message: u32, w: WPARAM, l: L
                     );
                 }
                 populate_languages(GetDlgItem(hwnd, 13));
-                for (id, after) in [(12, 11), (13, 12), (2, 13)] {
+                for (id, after) in [(14, 7), (12, 11), (13, 12), (2, 13)] {
                     SetWindowPos(
                         GetDlgItem(hwnd, id),
                         GetDlgItem(hwnd, after),
@@ -1753,7 +1765,7 @@ unsafe extern "system" fn options_proc(hwnd: HWND, message: u32, w: WPARAM, l: L
                 // Keep keyboard order checkboxes, slider, radio group, language, Close.
                 SetWindowPos(
                     GetDlgItem(hwnd, 5),
-                    GetDlgItem(hwnd, 7),
+                    GetDlgItem(hwnd, 14),
                     0,
                     0,
                     0,
@@ -1791,6 +1803,16 @@ unsafe extern "system" fn options_proc(hwnd: HWND, message: u32, w: WPARAM, l: L
                     0,
                 );
                 let checkbox = GetDlgItem(hwnd, 3);
+                SendMessageW(
+                    GetDlgItem(hwnd, 14),
+                    BM_SETCHECK,
+                    if crate::sound::ENABLED.load(Ordering::Relaxed) {
+                        BST_CHECKED
+                    } else {
+                        BST_UNCHECKED
+                    } as usize,
+                    0,
+                );
                 SendMessageW(
                     checkbox,
                     BM_SETCHECK,
@@ -1863,6 +1885,23 @@ unsafe extern "system" fn options_proc(hwnd: HWND, message: u32, w: WPARAM, l: L
                             checkbox,
                             BM_SETCHECK,
                             if ignore { BST_UNCHECKED } else { BST_CHECKED } as usize,
+                            0,
+                        );
+                        options_error(hwnd, &error);
+                    }
+                }
+                return 0;
+            }
+            WM_COMMAND if w & 0xffff == 14 && (w >> 16) == BN_CLICKED as usize => {
+                let checkbox = GetDlgItem(hwnd, 14);
+                let enabled = SendMessageW(checkbox, BM_GETCHECK, 0, 0) == BST_CHECKED as isize;
+                match crate::transparency_settings::save_sound_enabled(enabled) {
+                    Ok(()) => crate::sound::ENABLED.store(enabled, Ordering::Relaxed),
+                    Err(error) => {
+                        SendMessageW(
+                            checkbox,
+                            BM_SETCHECK,
+                            if enabled { BST_UNCHECKED } else { BST_CHECKED } as usize,
                             0,
                         );
                         options_error(hwnd, &error);
@@ -1950,7 +1989,7 @@ fn show_auxiliary(owner: HWND, options: bool) {
             left: 0,
             top: 0,
             right: (if options { 340 } else { 320 }) * dpi as i32 / 96,
-            bottom: (if options { 430 } else { 186 }) * dpi as i32 / 96,
+            bottom: (if options { 466 } else { 186 }) * dpi as i32 / 96,
         };
         let style = WS_OVERLAPPED | WS_CAPTION | WS_SYSMENU;
         AdjustWindowRectExForDpi(&mut bounds, style, 0, WS_EX_DLGMODALFRAME, dpi);
@@ -2225,6 +2264,10 @@ pub fn run() -> Result<(), String> {
         return self_test(true);
     }
     let mut manager = Manager::new()?;
+    crate::sound::ENABLED.store(
+        crate::transparency_settings::load_sound_enabled().map_err(|error| error.to_string())?,
+        Ordering::Relaxed,
+    );
     TRANSPARENCY.store(
         crate::transparency_settings::load().map_err(|error| error.to_string())?,
         Ordering::Relaxed,
@@ -3416,12 +3459,15 @@ fn self_test_options() -> Result<(), String> {
     #[cfg(test)]
     let _guard = UI_TEST_LOCK.lock().unwrap();
     let original = MINIMIZE_AS_MENU.load(Ordering::Relaxed);
+    let original_sound = crate::sound::ENABLED.load(Ordering::Relaxed);
     let original_language = localization::preference();
     let result = [false, true].into_iter().try_for_each(|as_menu| {
         MINIMIZE_AS_MENU.store(as_menu, Ordering::Relaxed);
+        crate::sound::ENABLED.store(as_menu, Ordering::Relaxed);
         check_options_window()
     });
     MINIMIZE_AS_MENU.store(original, Ordering::Relaxed);
+    crate::sound::ENABLED.store(original_sound, Ordering::Relaxed);
     localization::set_preference(original_language);
     result
 }
@@ -3443,6 +3489,7 @@ fn check_options_window() -> Result<(), String> {
             let as_icon = GetDlgItem(hwnd, 10);
             let as_menu = GetDlgItem(hwnd, 11);
             let language = GetDlgItem(hwnd, 13);
+            let sound = GetDlgItem(hwnd, 14);
             let choice_count = localization::choices().count() as isize;
             if language.is_null() || SendMessageW(language, CB_GETCOUNT, 0, 0) != choice_count {
                 return Err("Language dropdown does not contain all registered choices".into());
@@ -3472,6 +3519,7 @@ fn check_options_window() -> Result<(), String> {
                 }
                 for (control, expected) in [
                     (GetDlgItem(hwnd, 12), text("&Language")),
+                    (sound, text("&Sound effects")),
                     (close, text("Close")),
                     (GetDlgItem(about, 1), text("Close")),
                 ] {
@@ -3512,6 +3560,12 @@ fn check_options_window() -> Result<(), String> {
             {
                 return Err("Options does not reflect the ignore middle mouse preference".into());
             }
+            if sound.is_null()
+                || (SendMessageW(sound, BM_GETCHECK, 0, 0) == BST_CHECKED as isize)
+                    != crate::sound::ENABLED.load(Ordering::Relaxed)
+            {
+                return Err("Options does not reflect the sound effects preference".into());
+            }
             if slider.is_null()
                 || SendMessageW(slider, TBM_GETRANGEMIN, 0, 0) != 0
                 || SendMessageW(slider, TBM_GETRANGEMAX, 0, 0) != 10
@@ -3547,6 +3601,12 @@ fn check_options_window() -> Result<(), String> {
                 hwnd: ignore_middle,
                 ..tab
             };
+            if IsDialogMessageW(hwnd, &tab) == 0
+                || windows_sys::Win32::UI::Input::KeyboardAndMouse::GetFocus() != sound
+            {
+                return Err("Options keyboard navigation did not focus sound effects".into());
+            }
+            let tab = MSG { hwnd: sound, ..tab };
             if IsDialogMessageW(hwnd, &tab) == 0
                 || windows_sys::Win32::UI::Input::KeyboardAndMouse::GetFocus() != slider
             {

@@ -16,6 +16,7 @@ pub(super) const LANGUAGE: Language = Language {
             "&Automatically start with Windows",
         ),
         ("&Ignore middle mouse button", "&Ignore middle mouse button"),
+        ("&Sound effects", "&Sound effects"),
         ("As &icon", "As &icon"),
         ("As &menu", "As &menu"),
         ("Minimize to tray", "Minimize to tray"),

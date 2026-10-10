@@ -16,6 +16,7 @@ pub(super) const LANGUAGE: Language = Language {
             "隨 Windows 自動啟動(&A)",
         ),
         ("&Ignore middle mouse button", "忽略滑鼠中鍵(&I)"),
+        ("&Sound effects", "音效(&S)"),
         ("As &icon", "顯示為圖示(&I)"),
         ("As &menu", "顯示為選單項目(&M)"),
         ("Minimize to tray", "最小化至通知區域"),

@@ -6,6 +6,7 @@ compile_error!("WinRoll RS requires x86_64-pc-windows-msvc.");
 mod geometry;
 mod localization;
 mod native;
+mod sound;
 mod startup;
 mod transparency_settings;
 
