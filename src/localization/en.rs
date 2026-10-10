@@ -5,6 +5,49 @@ pub(super) const LANGUAGE: Language = Language {
     name: "English",
     windows_ids: &[0x0409],
     messages: &[
+        ("&Update now", "&Update now"),
+        (
+            "Could not download the update.\n\n{error}",
+            "Could not download the update.\n\n{error}",
+        ),
+        (
+            "Downloading update: {percent}% ({bytes} bytes)",
+            "Downloading update: {percent}% ({bytes} bytes)",
+        ),
+        (
+            "Downloading update... ({bytes} bytes)",
+            "Downloading update... ({bytes} bytes)",
+        ),
+        ("Verifying update package...", "Verifying update package..."),
+        (
+            "Update {version} verified and staged.\nYour installation has not changed.\nClosing this window discards the package.\n\n{path}",
+            "Update {version} verified and staged.\nYour installation has not changed.\nClosing this window discards the package.\n\n{path}",
+        ),
+        (
+            "Update package has no SHA-256 digest.",
+            "Update package has no SHA-256 digest.",
+        ),
+        (
+            "Update package has an invalid SHA-256 digest.",
+            "Update package has an invalid SHA-256 digest.",
+        ),
+        (
+            "Update package SHA-256 does not match.",
+            "Update package SHA-256 does not match.",
+        ),
+        (
+            "No matching update package was found.",
+            "No matching update package was found.",
+        ),
+        (
+            "Update download stopped unexpectedly.",
+            "Update download stopped unexpectedly.",
+        ),
+        (
+            "Update check stopped unexpectedly.",
+            "Update check stopped unexpectedly.",
+        ),
+        ("Update canceled.", "Update canceled."),
         ("Close", "Close"),
         ("Version {version}", "Version {version}"),
         ("Created by Kin Tam", "Created by Kin Tam"),

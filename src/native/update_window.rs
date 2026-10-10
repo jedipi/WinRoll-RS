@@ -22,7 +22,7 @@ pub(super) fn startup(owner: HWND) {
 pub(super) fn poll(owner: HWND) {
     let mut checker = CHECKER.lock().unwrap();
     let changed = checker.poll();
-    if !matches!(checker.state, State::Checking) {
+    if !checker.busy() {
         unsafe { KillTimer(owner, TIMER) };
     }
     drop(checker);
@@ -36,7 +36,14 @@ pub(super) fn refresh() {
     if hwnd.is_null() {
         return;
     }
-    let state = CHECKER.lock().unwrap().state.clone();
+    let checker = CHECKER.lock().unwrap();
+    let state = checker.state.clone();
+    let path = checker
+        .staged
+        .as_ref()
+        .map(|package| package.path.display().to_string())
+        .unwrap_or_default();
+    drop(checker);
     let label = match &state {
         State::Idle | State::Checking => text("Checking for updates...").to_owned(),
         State::Current => text("You're up to date.").to_owned(),
@@ -44,8 +51,18 @@ pub(super) fn refresh() {
             text("Update available: {version}").replace("{version}", version)
         }
         State::Failed(error) => {
-            text("Could not check for updates.\n\n{error}").replace("{error}", error)
+            text("Could not check for updates.\n\n{error}").replace("{error}", text(error))
         }
+        State::DownloadFailed(error) => text("Could not download the update.\n\n{error}").replace("{error}", text(error)),
+        State::Downloading { downloaded, total } => match total.filter(|total| *total > 0) {
+            Some(total) => text("Downloading update: {percent}% ({bytes} bytes)")
+                .replace("{percent}", &(u128::from(*downloaded) * 100 / u128::from(total)).min(100).to_string())
+                .replace("{bytes}", &downloaded.to_string()),
+            None => text("Downloading update... ({bytes} bytes)").replace("{bytes}", &downloaded.to_string()),
+        },
+        State::Verifying => text("Verifying update package...").to_owned(),
+        State::Staged(version) => text("Update {version} verified and staged.\nYour installation has not changed.\nClosing this window discards the package.\n\n{path}")
+            .replace("{version}", version).replace("{path}", &path),
     };
     let wide: Vec<u16> = label
         .replace("\r\n", "\n")
@@ -57,10 +74,21 @@ pub(super) fn refresh() {
     unsafe {
         SetWindowTextW(hwnd, wide_text("WinRoll RS - Updates").as_ptr());
         SetWindowTextW(GetDlgItem(hwnd, 10), wide.as_ptr());
-        SetWindowTextW(GetDlgItem(hwnd, IDOK), wide_text("&Retry").as_ptr());
+        SetWindowTextW(
+            GetDlgItem(hwnd, IDOK),
+            wide_text(if matches!(state, State::Available(_)) {
+                "&Update now"
+            } else {
+                "&Retry"
+            })
+            .as_ptr(),
+        );
         ShowWindow(
             GetDlgItem(hwnd, IDOK),
-            if matches!(state, State::Failed(_)) {
+            if matches!(
+                state,
+                State::Available(_) | State::Failed(_) | State::DownloadFailed(_)
+            ) {
                 SW_SHOW
             } else {
                 SW_HIDE
@@ -68,11 +96,16 @@ pub(super) fn refresh() {
         );
         SetWindowTextW(
             GetDlgItem(hwnd, IDCANCEL),
-            wide_text(if matches!(state, State::Checking) {
-                "Cancel"
-            } else {
-                "Close"
-            })
+            wide_text(
+                if matches!(
+                    state,
+                    State::Checking | State::Downloading { .. } | State::Verifying
+                ) {
+                    "Cancel"
+                } else {
+                    "Close"
+                },
+            )
             .as_ptr(),
         );
     }
@@ -99,9 +132,9 @@ unsafe extern "system" fn window_proc(hwnd: HWND, message: u32, w: WPARAM, l: LP
                         IDOK,
                         w!("BUTTON"),
                         BS_PUSHBUTTON as u32 | WS_TABSTOP,
-                        220,
+                        190,
                         182,
-                        90,
+                        120,
                         28,
                     ),
                     (
@@ -152,8 +185,21 @@ unsafe extern "system" fn window_proc(hwnd: HWND, message: u32, w: WPARAM, l: LP
                 return 0;
             }
             WM_COMMAND if w & 0xffff == IDOK as usize => {
-                if matches!(CHECKER.lock().unwrap().state, State::Failed(_)) {
-                    startup(GetWindow(hwnd, GW_OWNER));
+                let state = CHECKER.lock().unwrap().state.clone();
+                let owner = GetWindow(hwnd, GW_OWNER);
+                if matches!(state, State::Failed(_)) {
+                    startup(owner);
+                    refresh();
+                    SetFocus(GetDlgItem(hwnd, IDCANCEL));
+                } else if matches!(state, State::Available(_) | State::DownloadFailed(_)) {
+                    let mut checker = CHECKER.lock().unwrap();
+                    if SetTimer(owner, TIMER, 100, None) == 0 {
+                        checker.state =
+                            State::DownloadFailed(io::Error::last_os_error().to_string());
+                    } else {
+                        checker.update_now();
+                    }
+                    drop(checker);
                     refresh();
                     SetFocus(GetDlgItem(hwnd, IDCANCEL));
                 }
@@ -252,7 +298,12 @@ pub(super) fn show(owner: HWND) {
         WINDOW.store(hwnd as isize, Ordering::Relaxed);
         if !matches!(
             CHECKER.lock().unwrap().state,
-            State::Checking | State::Available(_)
+            State::Checking
+                | State::Available(_)
+                | State::Downloading { .. }
+                | State::Verifying
+                | State::Staged(_)
+                | State::DownloadFailed(_)
         ) {
             startup(owner);
         }
@@ -321,6 +372,7 @@ pub(super) fn self_test() -> Result<(), String> {
     let result = (|| {
         for language in [1, 2, 3] {
             localization::set_preference(language);
+            CHECKER.lock().unwrap().state = State::Available("1.1.0".into());
             refresh();
             let mut label = [0u16; 512];
             let len = unsafe {
@@ -330,6 +382,79 @@ pub(super) fn self_test() -> Result<(), String> {
                 != text("Update available: {version}").replace("{version}", "1.1.0")
             {
                 return Err("Update dialog did not translate the available version".into());
+            }
+            let staged = "Update {version} verified and staged.\nYour installation has not changed.\nClosing this window discards the package.\n\n{path}";
+            for (state, expected, action, cancel) in [
+                (
+                    State::Available("1.1.0".into()),
+                    text("Update available: {version}").replace("{version}", "1.1.0"),
+                    Some("&Update now"),
+                    "Close",
+                ),
+                (
+                    State::Downloading {
+                        downloaded: 2,
+                        total: Some(5),
+                    },
+                    text("Downloading update: {percent}% ({bytes} bytes)")
+                        .replace("{percent}", "40")
+                        .replace("{bytes}", "2"),
+                    None,
+                    "Cancel",
+                ),
+                (
+                    State::Downloading {
+                        downloaded: 2,
+                        total: None,
+                    },
+                    text("Downloading update... ({bytes} bytes)").replace("{bytes}", "2"),
+                    None,
+                    "Cancel",
+                ),
+                (
+                    State::Verifying,
+                    text("Verifying update package...").to_owned(),
+                    None,
+                    "Cancel",
+                ),
+                (
+                    State::Staged("1.1.0".into()),
+                    text(staged)
+                        .replace("{version}", "1.1.0")
+                        .replace("{path}", ""),
+                    None,
+                    "Close",
+                ),
+                (
+                    State::DownloadFailed("Update package SHA-256 does not match.".into()),
+                    text("Could not download the update.\n\n{error}")
+                        .replace("{error}", text("Update package SHA-256 does not match.")),
+                    Some("&Retry"),
+                    "Close",
+                ),
+            ] {
+                CHECKER.lock().unwrap().state = state;
+                refresh();
+                let control_text = |id| {
+                    let mut buffer = [0u16; 1024];
+                    let len = unsafe {
+                        GetWindowTextW(
+                            GetDlgItem(hwnd, id),
+                            buffer.as_mut_ptr(),
+                            buffer.len() as i32,
+                        )
+                    };
+                    String::from_utf16_lossy(&buffer[..len as usize]).replace("\r\n", "\n")
+                };
+                if control_text(10) != expected || control_text(IDCANCEL) != text(cancel) {
+                    return Err("Update progress or cancellation did not translate".into());
+                }
+                let visible = unsafe { IsWindowVisible(GetDlgItem(hwnd, IDOK)) != 0 };
+                if visible != action.is_some()
+                    || action.is_some_and(|action| control_text(IDOK) != text(action))
+                {
+                    return Err("Update consent or retry action is incorrect".into());
+                }
             }
         }
         CHECKER.lock().unwrap().state = State::Failed("offline".into());

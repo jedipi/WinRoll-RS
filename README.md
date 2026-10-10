@@ -124,7 +124,11 @@ Each language has its own source file and is compiled into the executable.
 WinRoll RS checks for a newer stable release quietly at startup. Choose **Check for update**
 from the tray to check manually; it becomes **Update available** when a newer release is found.
 The dialog shows the available version or **You're up to date.**, with retry and cancellation
-for manual checks. Downloading and installing updates remain planned additions.
+for manual checks. Choose **Update now** to download the matching portable ZIP or installed
+setup package, with progress, cancellation and retry. WinRoll requires a valid GitHub asset
+SHA-256 digest and verifies the download before staging it in a temporary directory.
+This step leaves your installation, preferences and startup registration unchanged. Closing
+the dialog discards the staged package; installation and restart are still planned additions.
 
 ### Polish
 

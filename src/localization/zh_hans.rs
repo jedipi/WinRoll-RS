@@ -5,6 +5,46 @@ pub(super) const LANGUAGE: Language = Language {
     name: "简体中文",
     windows_ids: &[0x0004, 0x0804, 0x1004],
     messages: &[
+        ("&Update now", "立即更新(&U)"),
+        (
+            "Could not download the update.\n\n{error}",
+            "无法下载更新。\n\n{error}",
+        ),
+        (
+            "Downloading update: {percent}% ({bytes} bytes)",
+            "正在下载更新：{percent}%（{bytes} 字节）",
+        ),
+        (
+            "Downloading update... ({bytes} bytes)",
+            "正在下载更新...（{bytes} 字节）",
+        ),
+        ("Verifying update package...", "正在验证更新包..."),
+        (
+            "Update {version} verified and staged.\nYour installation has not changed.\nClosing this window discards the package.\n\n{path}",
+            "更新 {version} 已验证并暂存。\n当前安装未改变。\n关闭此窗口将丢弃更新包。\n\n{path}",
+        ),
+        (
+            "Update package has no SHA-256 digest.",
+            "更新包没有 SHA-256 摘要。",
+        ),
+        (
+            "Update package has an invalid SHA-256 digest.",
+            "更新包的 SHA-256 摘要无效。",
+        ),
+        (
+            "Update package SHA-256 does not match.",
+            "更新包的 SHA-256 摘要不匹配。",
+        ),
+        (
+            "No matching update package was found.",
+            "未找到匹配的更新包。",
+        ),
+        (
+            "Update download stopped unexpectedly.",
+            "更新下载意外停止。",
+        ),
+        ("Update check stopped unexpectedly.", "更新检查意外停止。"),
+        ("Update canceled.", "更新已取消。"),
         ("Close", "关闭"),
         ("Version {version}", "版本 {version}"),
         ("Created by Kin Tam", "作者：Kin Tam"),
