@@ -33,6 +33,7 @@ use windows_sys::{
 };
 
 mod tray_windows;
+mod update_window;
 
 use crate::localization::{self, text};
 
@@ -60,6 +61,7 @@ const PAUSE: u32 = 4;
 const EXIT: u32 = 8;
 const ABOUT: u32 = 16;
 const SETTINGS: u32 = 32;
+const CHECK_UPDATE: u32 = 64;
 const RECREATE_TRAY: u32 = 256;
 const TOGGLE_ENABLED: u32 = 512;
 // TBM_GETPOS is WM_USER, omitted by the windows-sys metadata.
@@ -1539,6 +1541,7 @@ fn refresh_options_language(hwnd: HWND) {
 fn apply_language(hwnd: HWND, preference: u32) {
     localization::set_preference(preference);
     refresh_options_language(hwnd);
+    update_window::refresh();
     unsafe {
         let about = ABOUT_WINDOW.load(Ordering::Relaxed) as HWND;
         if !about.is_null() {
@@ -2092,6 +2095,10 @@ unsafe extern "system" fn tray_proc(hwnd: HWND, message: u32, w: WPARAM, l: LPAR
             return 0;
         }
         match message {
+            WM_TIMER if w == update_window::TIMER => {
+                update_window::poll(hwnd);
+                return 0;
+            }
             WINDOW_TRAY_CALLBACK => {
                 // These icons use the original callback format: w is the full icon ID.
                 if matches!(
@@ -2180,6 +2187,12 @@ unsafe extern "system" fn tray_proc(hwnd: HWND, message: u32, w: WPARAM, l: LPAR
                     ABOUT as usize,
                     wide_text("&About...").as_ptr(),
                 );
+                AppendMenuW(
+                    menu,
+                    MF_STRING,
+                    CHECK_UPDATE as usize,
+                    wide_text(update_window::menu_label()).as_ptr(),
+                );
                 AppendMenuW(menu, MF_STRING, EXIT as usize, wide_text("E&xit").as_ptr());
                 // Version 4 supplies the icon anchor for keyboard as well as mouse activation.
                 let x = w as i16 as i32;
@@ -2203,6 +2216,9 @@ unsafe extern "system" fn tray_proc(hwnd: HWND, message: u32, w: WPARAM, l: LPAR
                 }
                 if action == SETTINGS {
                     show_auxiliary(hwnd, true);
+                }
+                if action == CHECK_UPDATE {
+                    update_window::show(hwnd);
                 }
                 if matches!(action, ENABLE | PAUSE | UNROLL_ALL | EXIT) {
                     request_control(action);
@@ -2487,12 +2503,14 @@ pub fn run() -> Result<(), String> {
         }
     });
     log("WinRoll RS enabled. Use the tray menu to Pause, Unroll all or Exit.");
+    update_window::startup(tray);
     pump_until_restored();
     let result = worker
         .join()
         .map_err(|_| "Window worker panicked".to_owned());
     unsafe {
         UnhookWindowsHookEx(hook);
+        update_window::close(tray);
         tray_icon(tray, NIM_DELETE);
         let about = ABOUT_WINDOW.load(Ordering::Relaxed) as HWND;
         if !about.is_null() {
@@ -2528,6 +2546,9 @@ fn pump_until_restored() {
             }
             let about = ABOUT_WINDOW.load(Ordering::Relaxed) as HWND;
             if !about.is_null() && IsDialogMessageW(about, &msg) != 0 {
+                continue;
+            }
+            if update_window::dialog_message(&msg) {
                 continue;
             }
             TranslateMessage(&msg);
@@ -3111,6 +3132,7 @@ fn self_test(interactive: bool) -> Result<(), String> {
     result?;
     tray_windows::self_test()?;
     self_test_options()?;
+    update_window::self_test()?;
     self_test_menu_exit()
 }
 

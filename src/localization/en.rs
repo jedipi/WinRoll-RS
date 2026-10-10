@@ -9,6 +9,22 @@ pub(super) const LANGUAGE: Language = Language {
         ("Version {version}", "Version {version}"),
         ("Created by Kin Tam", "Created by Kin Tam"),
         ("About WinRoll RS", "About WinRoll RS"),
+        ("&Check for update...", "&Check for update..."),
+        ("&Update available...", "&Update available..."),
+        ("WinRoll RS - Updates", "WinRoll RS - Updates"),
+        ("Checking for updates...", "Checking for updates..."),
+        ("You're up to date.", "You're up to date."),
+        ("Update available: {version}", "Update available: {version}"),
+        (
+            "Could not check for updates.\n\n{error}",
+            "Could not check for updates.\n\n{error}",
+        ),
+        ("&Retry", "&Retry"),
+        ("Cancel", "Cancel"),
+        (
+            "Cannot open the update window",
+            "Cannot open the update window",
+        ),
         ("WinRoll RS - Options", "WinRoll RS - Options"),
         ("WinRoll RS Options", "WinRoll RS Options"),
         (

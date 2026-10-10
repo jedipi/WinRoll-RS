@@ -119,6 +119,13 @@ Support Multi Languages
 To add or improve a language, see [Contributing translations](src/localization/README.md).
 Each language has its own source file and is compiled into the executable.
 
+### Update checks
+
+WinRoll RS checks for a newer stable release quietly at startup. Choose **Check for update**
+from the tray to check manually; it becomes **Update available** when a newer release is found.
+The dialog shows the available version or **You're up to date.**, with retry and cancellation
+for manual checks. Downloading and installing updates remain planned additions.
+
 ### Polish
 
 Other planned additions include:

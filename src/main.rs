@@ -9,6 +9,7 @@ mod native;
 mod sound;
 mod startup;
 mod transparency_settings;
+mod updates;
 
 fn main() {
     if let Err(error) = native::run() {
