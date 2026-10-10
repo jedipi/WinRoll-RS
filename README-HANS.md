@@ -8,10 +8,10 @@ WinRoll RS 用 Rust 重新打造 WinRoll 2.0，适用于 Windows 10 和 Windows 
 
 [![下载 WinRoll RS](https://img.shields.io/badge/Download-WinRoll%20RS-2563eb?style=for-the-badge)](https://github.com/jedipi/WinRoll-RS/releases/latest)
 
-最新版本 v0.1.1 的直接下载链接：
+最新版本 v1.0.0 的直接下载链接：
 
-- [便携版 (ZIP, x64)](https://github.com/jedipi/WinRoll-RS/releases/download/v0.1.1/winroll-0.1.1-x64-portable.zip)
-- [安装程序 (EXE, x64)](https://github.com/jedipi/WinRoll-RS/releases/download/v0.1.1/winroll-0.1.1-x64-setup.exe)
+- [便携版 (ZIP, x64)](https://github.com/jedipi/WinRoll-RS/releases/download/v1.0.0/winroll-1.0.0-x64-portable.zip)
+- [安装程序 (EXE, x64)](https://github.com/jedipi/WinRoll-RS/releases/download/v1.0.0/winroll-1.0.0-x64-setup.exe)
 
 WinRoll 能像卷起窗帘一样，把窗口收起来，只留下标题栏。它还提供几项实用的窗口管理功能：窗口置顶、移至最底层、调整透明度，以及最小化到系统托盘。
 
