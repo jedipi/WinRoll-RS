@@ -288,11 +288,12 @@ fn stage(
     } else {
         format!("winroll-{}-x64.zip", offer.version)
     };
+    let portable_name = format!("winroll-{}-x64-portable.zip", offer.version);
     let asset = offer
         .release
         .assets()
         .iter()
-        .find(|asset| asset.name() == name)
+        .find(|asset| asset.name() == name || (!installed && asset.name() == portable_name))
         .ok_or("No matching update package was found.")?;
     let digest = asset
         .digest()
@@ -305,7 +306,7 @@ fn stage(
         .prefix("winroll-update-")
         .tempdir()
         .map_err(|e| e.to_string())?;
-    let path = directory.path().join(name);
+    let path = directory.path().join(asset.name());
     let mut writer = PackageWriter {
         file: File::create(&path).map_err(|e| e.to_string())?,
         hash: Sha256::new(),
@@ -418,6 +419,49 @@ mod tests {
             checker.cancel();
             assert!(!path.exists(), "Canceled staging must be cleaned up");
         }
+    }
+
+    #[test]
+    fn published_portable_asset_can_be_staged() {
+        let mut checker = Checker::new();
+        checker.start(|| {
+            Ok(Some(Offer {
+                version: "1.0.0".into(),
+                release: Release::builder()
+                    .version("1.0.0")
+                    .asset(
+                        ReleaseAsset::new(
+                            "winroll-1.0.0-x64-portable.zip",
+                            "https://fixture/portable",
+                        )
+                        .with_digest(HELLO_DIGEST),
+                    )
+                    .asset(
+                        ReleaseAsset::new(
+                            "winroll-1.0.0-x64-setup.exe",
+                            "https://fixture/installer",
+                        )
+                        .with_digest(HELLO_DIGEST),
+                    )
+                    .build()
+                    .unwrap(),
+            }))
+        });
+        settle(&mut checker);
+        checker.update_with(|offer, progress| {
+            stage(offer, false, progress, |asset, writer, _| {
+                assert_eq!(asset.name(), "winroll-1.0.0-x64-portable.zip");
+                writer
+                    .write_all(b"hello")
+                    .map_err(|error| error.to_string())
+            })
+        });
+        settle(&mut checker);
+        assert_eq!(checker.state, State::Staged("1.0.0".into()));
+        assert_eq!(
+            checker.staged.as_ref().unwrap().path.file_name().unwrap(),
+            "winroll-1.0.0-x64-portable.zip"
+        );
     }
 
     #[test]
