@@ -2556,6 +2556,7 @@ pub fn run() -> Result<(), String> {
         }
     });
     log("WinRoll RS enabled. Use the tray menu to Pause, Unroll all or Exit.");
+    crate::updates::startup_status("ready");
     update_window::startup(tray);
     pump_until_restored();
     let result = worker

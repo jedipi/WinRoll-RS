@@ -8,8 +8,8 @@ $helper = [regex]::Match($source, '(?s)const HELPER: &str = r#"(.*?)"#;').Groups
 if (!$helper) { throw 'Cannot find the production portable helper.' }
 $compiler = Join-Path $env:SystemRoot 'Microsoft.NET\Framework64\v4.0.30319\csc.exe'
 $processes = @()
-function Wait-Until($Test, $Description) {
-    $deadline = [DateTime]::UtcNow.AddSeconds(15)
+function Wait-Until($Test, $Description, $Seconds = 15) {
+    $deadline = [DateTime]::UtcNow.AddSeconds($Seconds)
     while (!(& $Test)) {
         if ([DateTime]::UtcNow -ge $deadline) { throw "Timed out: $Description" }
         Start-Sleep -Milliseconds 50
@@ -24,7 +24,7 @@ public static class SmokeWindow {
 }
 '@
 try {
-    foreach ($mode in @('success', 'startup', 'locked', 'invalid')) {
+    foreach ($mode in @('success', 'startup', 'delayed-startup', 'unconfirmed', 'locked', 'invalid')) {
         $failure = $mode -ne 'success'
         $case = Join-Path $root $mode
         $stage = Join-Path $case '.winroll-update-smoke'
@@ -34,10 +34,15 @@ try {
         foreach ($kind in @('original', 'updated')) {
             $output = if ($kind -eq 'original') { $target } else { $replacement }
             $sleep = if ($mode -eq 'startup' -and $kind -eq 'updated') { '' } else { 'System.Threading.Thread.Sleep(60000);' }
+            $signal = if ($kind -eq 'updated' -and $mode -eq 'success') {
+                'System.Threading.Thread.Sleep(1500); File.WriteAllText(Environment.GetEnvironmentVariable("WINROLL_UPDATE_STATUS"), "ready");'
+            } elseif ($kind -eq 'updated' -and $mode -eq 'delayed-startup') {
+                'System.Threading.Thread.Sleep(1500); File.WriteAllText(Environment.GetEnvironmentVariable("WINROLL_UPDATE_STATUS"), "failed");'
+            } else { '' }
             $code = @"
 using System;
 using System.IO;
-class Program { static void Main() { File.AppendAllText(Path.Combine(AppDomain.CurrentDomain.BaseDirectory, "$kind.txt"), "started\n"); $sleep } }
+class Program { static void Main() { File.AppendAllText(Path.Combine(AppDomain.CurrentDomain.BaseDirectory, "$kind.txt"), "started\n"); $signal $sleep } }
 "@
             $cs = Join-Path $case "$kind.cs"
             Set-Content -LiteralPath $cs -Value $code
@@ -86,7 +91,20 @@ class Program { static void Main() { File.AppendAllText(Path.Combine(AppDomain.C
         $old.Kill()
         $old.WaitForExit()
         if ($mode -ne 'locked') { Wait-Until { Test-Path -LiteralPath (Join-Path $case 'updated.txt') } 'replacement restart' }
-        if ($failure) {
+        if ($mode -eq 'unconfirmed') {
+            Wait-Until { Test-Path -LiteralPath (Join-Path $stage 'error') } 'unconfirmed startup timeout' 45
+            $backup = Join-Path $stage 'previous.exe'
+            if ((Get-FileHash -LiteralPath $backup).Hash -ne $originalHash -or
+                (Get-FileHash -LiteralPath $target).Hash -ne $updatedHash -or
+                !(Get-Process -Name winroll -ErrorAction SilentlyContinue | Where-Object { $_.Path -eq $target })) {
+                throw 'Unconfirmed startup lost its backup or terminated the live replacement.'
+            }
+            if ((Get-Content -LiteralPath (Join-Path $stage 'error') -Raw) -notlike "*Previous executable saved at: $backup*") {
+                throw 'Unconfirmed startup did not report the preserved backup.'
+            }
+            [SmokeWindow]::PostMessage([SmokeWindow]::FindWindow($null, 'smoke update failure'), 0x10, [IntPtr]::Zero, [IntPtr]::Zero) | Out-Null
+            if (!$worker.WaitForExit(1000)) { $worker.Kill(); $worker.WaitForExit() }
+        } elseif ($failure) {
             Wait-Until { (Get-Content -LiteralPath (Join-Path $case 'original.txt')).Count -eq 2 } 'rollback restart'
             if ((Get-FileHash -LiteralPath $target).Hash -ne $originalHash) { throw 'Startup failure did not restore the old executable.' }
             Wait-Until { Test-Path -LiteralPath (Join-Path $stage 'error') } 'reported update error'
@@ -100,7 +118,7 @@ class Program { static void Main() { File.AppendAllText(Path.Combine(AppDomain.C
         Get-Process -Name winroll -ErrorAction SilentlyContinue | Where-Object { $_.Path -eq $target } | Stop-Process -Force
         if ($lock) { $lock.Dispose(); $lock = $null }
     }
-    'PASS: replacement waits for process exit, installs and restarts, recovers locked-target and failed-startup errors, rejects invalid executables, and cleans successful staging (paths with spaces and apostrophes).'
+    'PASS: replacement waits for process exit and confirmed startup, rolls back immediate/delayed startup failures, preserves a live unconfirmed replacement and its backup, recovers locked-target errors, rejects invalid executables, and cleans successful staging (paths with spaces and apostrophes).'
 } finally {
     if ($lock) { $lock.Dispose() }
     foreach ($process in $processes) { if (!$process.HasExited) { $process.Kill(); $process.WaitForExit() } }

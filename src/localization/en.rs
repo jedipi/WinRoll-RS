@@ -42,6 +42,10 @@ pub(super) const LANGUAGE: Language = Language {
             "The updated executable exited before startup completed.",
         ),
         (
+            "The updated executable did not confirm startup.",
+            "The updated executable did not confirm startup.",
+        ),
+        (
             "Recovering windows before updating...\nRetry recovery or cancel to keep WinRoll running.",
             "Recovering windows before updating...\nRetry recovery or cancel to keep WinRoll running.",
         ),

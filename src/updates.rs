@@ -16,6 +16,19 @@ use std::{
 mod install_mode;
 mod portable;
 
+pub fn startup_status(status: &str) {
+    static REPORTED: std::sync::Once = std::sync::Once::new();
+    // Later runtime errors must not change a successful startup result.
+    REPORTED.call_once(|| {
+        if let Some(path) = std::env::var_os("WINROLL_UPDATE_STATUS") {
+            let path = std::path::PathBuf::from(path);
+            let temporary = path.with_extension("tmp");
+            let _ =
+                std::fs::write(&temporary, status).and_then(|()| std::fs::rename(temporary, path));
+        }
+    });
+}
+
 #[derive(Clone, Debug)]
 pub struct Offer {
     pub version: String,

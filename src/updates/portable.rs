@@ -91,6 +91,7 @@ const HELPER_ERRORS: &[&str] = &[
     "The portable package does not contain a Windows executable.",
     "The portable package does not contain an AMD64 PE32+ executable.",
     "The updated executable exited before startup completed.",
+    "The updated executable did not confirm startup.",
 ];
 
 const HELPER: &str = r#"param($Target, $Archive, $Stage, [int]$ParentId, $ErrorTitle, $Restored, $SavedAt)
@@ -99,6 +100,8 @@ $ready = $false
 $preserve = $false
 $backup = Join-Path $Stage 'previous.exe'
 $source = Join-Path $Stage 'winroll.exe'
+$status = Join-Path $Stage 'startup'
+$next = $null
 $messages = @{}
 $catalog = Join-Path $Stage 'messages.txt'
 if ([IO.File]::Exists($catalog)) {
@@ -147,11 +150,31 @@ try {
     try {
         [IO.File]::Move($Target, $backup)
         [IO.File]::Move($source, $Target)
-        $next = Start-Process -FilePath $Target -WorkingDirectory ([IO.Path]::GetDirectoryName($Target)) -WindowStyle Hidden -PassThru
-        # shortcut: startup uses one-second survival; add a readiness handshake if startup becomes multi-stage.
-        if ($next.WaitForExit(1000)) { throw 'The updated executable exited before startup completed.' }
+        $env:WINROLL_UPDATE_STATUS = $status
+        try {
+            $next = Start-Process -FilePath $Target -WorkingDirectory ([IO.Path]::GetDirectoryName($Target)) -WindowStyle Hidden -PassThru
+        } finally { Remove-Item Env:\WINROLL_UPDATE_STATUS }
+        $deadline = [DateTime]::UtcNow.AddSeconds(30)
+        while ($true) {
+            if ([IO.File]::Exists($status)) {
+                $result = [IO.File]::ReadAllText($status)
+                if ($result -eq 'ready') { break }
+                if ($result -eq 'failed') {
+                    # Initialization failed before window management began; dismiss its error dialog.
+                    if (!$next.HasExited) { $next.Kill(); $next.WaitForExit() }
+                    throw 'The updated executable exited before startup completed.'
+                }
+            }
+            if ($next.WaitForExit(50)) { throw 'The updated executable exited before startup completed.' }
+            if ([DateTime]::UtcNow -ge $deadline) { throw 'The updated executable did not confirm startup.' }
+        }
     } catch {
         $failure = Error-Text $_.Exception.Message
+        # An unconfirmed live process may own window state; keep its backup without terminating it.
+        if ($next -and !$next.HasExited) {
+            $preserve = $true
+            throw "$failure`n$SavedAt $backup"
+        }
         try {
             if ([IO.File]::Exists($backup)) {
                 if ([IO.File]::Exists($Target)) { [IO.File]::Delete($Target) }

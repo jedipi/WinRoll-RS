@@ -42,6 +42,10 @@ pub(super) const LANGUAGE: Language = Language {
             "更新后的程序在启动完成前退出。",
         ),
         (
+            "The updated executable did not confirm startup.",
+            "更新后的程序未确认启动成功。",
+        ),
+        (
             "Recovering windows before updating...\nRetry recovery or cancel to keep WinRoll running.",
             "正在恢复窗口以便更新...\n请重试恢复，或取消以保持 WinRoll 运行。",
         ),

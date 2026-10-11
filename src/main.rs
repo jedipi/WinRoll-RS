@@ -13,6 +13,7 @@ mod updates;
 
 fn main() {
     if let Err(error) = native::run() {
+        updates::startup_status("failed");
         native::report_error(&error);
         std::process::exit(1);
     }
