@@ -127,8 +127,12 @@ The dialog shows the available version or **You're up to date.**, with retry and
 for manual checks. Choose **Update now** to download the matching portable ZIP or installed
 setup package, with progress, cancellation and retry. WinRoll requires a valid GitHub asset
 SHA-256 digest and verifies the download before staging it in a temporary directory.
-This step leaves your installation, preferences and startup registration unchanged. Closing
-the dialog discards the staged package; installation and restart are still planned additions.
+Portable copies then recover managed windows, replace the executable in its existing location
+and restart automatically, preserving preferences and startup registration. Failed recovery
+keeps WinRoll running with identified windows and **Retry**; cancelling clears the update
+without losing window recovery state. Once installation starts, closing the dialog is blocked.
+Replacement or startup failure restores the previous executable where possible and reports
+the error. Installed copies can download and verify packages, but installer handoff is still planned.
 
 ### Polish
 

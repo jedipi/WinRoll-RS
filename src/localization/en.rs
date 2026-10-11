@@ -5,6 +5,71 @@ pub(super) const LANGUAGE: Language = Language {
     name: "English",
     windows_ids: &[0x0409],
     messages: &[
+        (
+            "Portable update preparation timed out.",
+            "Portable update preparation timed out.",
+        ),
+        (
+            "Portable update helper stopped unexpectedly.",
+            "Portable update helper stopped unexpectedly.",
+        ),
+        (
+            "Cannot locate Windows PowerShell.",
+            "Cannot locate Windows PowerShell.",
+        ),
+        (
+            "Cannot locate the executable directory.",
+            "Cannot locate the executable directory.",
+        ),
+        (
+            "The portable staging directory must be an update directory beside the target.",
+            "The portable staging directory must be an update directory beside the target.",
+        ),
+        (
+            "The portable package must contain exactly one root winroll.exe.",
+            "The portable package must contain exactly one root winroll.exe.",
+        ),
+        (
+            "The portable package does not contain a Windows executable.",
+            "The portable package does not contain a Windows executable.",
+        ),
+        (
+            "The portable package does not contain an AMD64 PE32+ executable.",
+            "The portable package does not contain an AMD64 PE32+ executable.",
+        ),
+        (
+            "The updated executable exited before startup completed.",
+            "The updated executable exited before startup completed.",
+        ),
+        (
+            "Recovering windows before updating...\nRetry recovery or cancel to keep WinRoll running.",
+            "Recovering windows before updating...\nRetry recovery or cancel to keep WinRoll running.",
+        ),
+        (
+            "Installing update and restarting WinRoll...",
+            "Installing update and restarting WinRoll...",
+        ),
+        (
+            "Could not install the update.\n\n{error}",
+            "Could not install the update.\n\n{error}",
+        ),
+        (
+            "Installed updates are not supported yet.",
+            "Installed updates are not supported yet.",
+        ),
+        (
+            "Update installation stopped unexpectedly.",
+            "Update installation stopped unexpectedly.",
+        ),
+        ("Portable update failed.", "Portable update failed."),
+        (
+            "The previous version was restored. Please try the update again.",
+            "The previous version was restored. Please try the update again.",
+        ),
+        (
+            "The previous executable is saved at:",
+            "The previous executable is saved at:",
+        ),
         ("&Update now", "&Update now"),
         (
             "Could not download the update.\n\n{error}",

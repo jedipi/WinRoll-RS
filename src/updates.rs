@@ -14,6 +14,7 @@ use std::{
 };
 
 mod install_mode;
+mod portable;
 
 #[derive(Clone, Debug)]
 pub struct Offer {
@@ -32,6 +33,10 @@ pub enum State {
     Verifying,
     Staged(String),
     DownloadFailed(String),
+    Recovering,
+    Installing,
+    InstallFailed(String),
+    ReadyToExit,
 }
 
 pub struct StagedPackage {
@@ -44,6 +49,7 @@ enum Event {
     Checked(Result<Option<Offer>, String>),
     Progress(State),
     Downloaded(Result<StagedPackage, String>),
+    Installed(Result<(), String>),
 }
 
 #[derive(Clone)]
@@ -118,7 +124,11 @@ impl Checker {
     pub fn busy(&self) -> bool {
         matches!(
             self.state,
-            State::Checking | State::Downloading { .. } | State::Verifying
+            State::Checking
+                | State::Downloading { .. }
+                | State::Verifying
+                | State::Recovering
+                | State::Installing
         )
     }
 
@@ -133,7 +143,10 @@ impl Checker {
         &mut self,
         service: impl FnOnce(Offer, Progress) -> Result<StagedPackage, String> + Send + 'static,
     ) {
-        if !matches!(self.state, State::Available(_) | State::DownloadFailed(_)) {
+        if !matches!(
+            self.state,
+            State::Available(_) | State::DownloadFailed(_) | State::InstallFailed(_)
+        ) {
             return;
         }
         let Some(offer) = self.available.clone() else {
@@ -173,6 +186,8 @@ impl Checker {
             Err(TryRecvError::Disconnected) => {
                 if matches!(self.state, State::Checking) {
                     Event::Checked(Err("Update check stopped unexpectedly.".into()))
+                } else if self.state == State::Installing {
+                    Event::Installed(Err("Update installation stopped unexpectedly.".into()))
                 } else {
                     Event::Downloaded(Err("Update download stopped unexpectedly.".into()))
                 }
@@ -196,12 +211,17 @@ impl Checker {
                 state
             }
             Event::Downloaded(Err(error)) => State::DownloadFailed(error),
+            Event::Installed(Ok(())) => State::ReadyToExit,
+            Event::Installed(Err(error)) => State::InstallFailed(error),
             Event::Progress(_) => unreachable!(),
         };
         true
     }
 
     pub fn cancel(&mut self) {
+        if matches!(self.state, State::Installing | State::ReadyToExit) {
+            return;
+        }
         if let Some(canceled) = self.canceled.take() {
             canceled.store(true, Ordering::Relaxed);
         }
@@ -212,6 +232,51 @@ impl Checker {
             .available
             .as_ref()
             .map_or(State::Idle, |offer| State::Available(offer.version.clone()));
+    }
+
+    pub fn recover(&mut self) -> bool {
+        if !matches!(self.state, State::Staged(_)) {
+            return false;
+        }
+        if self
+            .staged
+            .as_ref()
+            .is_none_or(|package| package.path.extension().is_none_or(|ext| ext != "zip"))
+        {
+            self.staged = None;
+            self.state = State::InstallFailed("Installed updates are not supported yet.".into());
+            return false;
+        }
+        self.state = State::Recovering;
+        true
+    }
+
+    pub fn recovered(&mut self) {
+        self.install_with(portable::prepare);
+    }
+
+    pub fn install_with(
+        &mut self,
+        service: impl FnOnce(StagedPackage) -> Result<(), String> + Send + 'static,
+    ) {
+        if self.state != State::Recovering {
+            return;
+        }
+        let Some(package) = self.staged.take() else {
+            return;
+        };
+        let (sender, receiver) = mpsc::sync_channel(1);
+        self.pending = Some(receiver);
+        self.state = State::Installing;
+        if let Err(error) = thread::Builder::new()
+            .name("update-install".into())
+            .spawn(move || {
+                let _ = sender.send(Event::Installed(service(package)));
+            })
+        {
+            self.pending = None;
+            self.state = State::InstallFailed(error.to_string());
+        }
     }
 }
 
@@ -389,6 +454,87 @@ mod tests {
             checker.poll();
             assert!(Instant::now() < deadline, "Update did not finish");
             thread::yield_now();
+        }
+    }
+
+    #[test]
+    fn installation_requires_verified_portable_package_and_recovery() {
+        let mut checker = Checker::new();
+        checker.install_with(|_| panic!("Cannot install before verification"));
+        for installed in [true, false] {
+            checker.start(|| Ok(Some(offer("1.1.0", Some(HELLO_DIGEST)))));
+            settle(&mut checker);
+            checker.update_with(move |offer, progress| {
+                stage(offer, installed, progress, |_, writer, _| {
+                    writer.write_all(b"hello").map_err(|e| e.to_string())
+                })
+            });
+            settle(&mut checker);
+            checker.install_with(|_| panic!("Cannot install before recovery"));
+            assert_eq!(checker.recover(), !installed);
+            if installed {
+                assert!(matches!(checker.state, State::InstallFailed(_)));
+                continue;
+            }
+            let path = checker.staged.as_ref().unwrap().path.clone();
+            checker.cancel();
+            checker.install_with(|_| panic!("Canceled recovery cannot install or exit"));
+            assert!(!path.exists());
+            assert_eq!(checker.state, State::Available("1.1.0".into()));
+        }
+        checker.update_with(|offer, progress| {
+            stage(offer, false, progress, |_, writer, _| {
+                writer.write_all(b"hello").map_err(|e| e.to_string())
+            })
+        });
+        settle(&mut checker);
+        assert!(checker.recover());
+        let (ready, observed) = mpsc::channel();
+        let (release, wait) = mpsc::channel();
+        checker.install_with(move |package| {
+            assert_eq!(std::fs::read(package.path).unwrap(), b"hello");
+            ready.send(()).unwrap();
+            wait.recv().unwrap();
+            Ok(())
+        });
+        observed.recv_timeout(Duration::from_secs(2)).unwrap();
+        checker.cancel();
+        assert_eq!(checker.state, State::Installing);
+        assert!(!checker.poll(), "Installation does not block UI polling");
+        release.send(()).unwrap();
+        settle(&mut checker);
+        assert_eq!(checker.state, State::ReadyToExit);
+    }
+
+    #[test]
+    fn installation_failure_allows_retry_without_exit() {
+        let mut checker = Checker::new();
+        checker.start(|| Ok(Some(offer("1.1.0", Some(HELLO_DIGEST)))));
+        settle(&mut checker);
+        for succeeds in [false, true] {
+            checker.update_with(|offer, progress| {
+                stage(offer, false, progress, |_, writer, _| {
+                    writer.write_all(b"hello").map_err(|e| e.to_string())
+                })
+            });
+            settle(&mut checker);
+            assert!(checker.recover());
+            checker.install_with(move |_| {
+                if succeeds {
+                    Ok(())
+                } else {
+                    Err("locked".into())
+                }
+            });
+            settle(&mut checker);
+            assert_eq!(
+                checker.state,
+                if succeeds {
+                    State::ReadyToExit
+                } else {
+                    State::InstallFailed("locked".into())
+                }
+            );
         }
     }
 

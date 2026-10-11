@@ -5,6 +5,71 @@ pub(super) const LANGUAGE: Language = Language {
     name: "简体中文",
     windows_ids: &[0x0004, 0x0804, 0x1004],
     messages: &[
+        (
+            "Portable update preparation timed out.",
+            "便携版更新准备超时。",
+        ),
+        (
+            "Portable update helper stopped unexpectedly.",
+            "便携版更新助手意外停止。",
+        ),
+        (
+            "Cannot locate Windows PowerShell.",
+            "无法找到 Windows PowerShell。",
+        ),
+        (
+            "Cannot locate the executable directory.",
+            "无法找到程序目录。",
+        ),
+        (
+            "The portable staging directory must be an update directory beside the target.",
+            "便携版暂存目录必须位于目标程序旁的更新目录中。",
+        ),
+        (
+            "The portable package must contain exactly one root winroll.exe.",
+            "便携版更新包的根目录必须包含且仅包含一个 winroll.exe。",
+        ),
+        (
+            "The portable package does not contain a Windows executable.",
+            "便携版更新包不包含 Windows 可执行文件。",
+        ),
+        (
+            "The portable package does not contain an AMD64 PE32+ executable.",
+            "便携版更新包不包含 AMD64 PE32+ 可执行文件。",
+        ),
+        (
+            "The updated executable exited before startup completed.",
+            "更新后的程序在启动完成前退出。",
+        ),
+        (
+            "Recovering windows before updating...\nRetry recovery or cancel to keep WinRoll running.",
+            "正在恢复窗口以便更新...\n请重试恢复，或取消以保持 WinRoll 运行。",
+        ),
+        (
+            "Installing update and restarting WinRoll...",
+            "正在安装更新并重启 WinRoll...",
+        ),
+        (
+            "Could not install the update.\n\n{error}",
+            "无法安装更新。\n\n{error}",
+        ),
+        (
+            "Installed updates are not supported yet.",
+            "暂不支持安装版更新。",
+        ),
+        (
+            "Update installation stopped unexpectedly.",
+            "更新安装意外停止。",
+        ),
+        ("Portable update failed.", "便携版更新失败。"),
+        (
+            "The previous version was restored. Please try the update again.",
+            "已恢复之前的版本。请重试更新。",
+        ),
+        (
+            "The previous executable is saved at:",
+            "之前的可执行文件保存在：",
+        ),
         ("&Update now", "立即更新(&U)"),
         (
             "Could not download the update.\n\n{error}",

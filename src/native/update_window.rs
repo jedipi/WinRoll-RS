@@ -22,11 +22,29 @@ pub(super) fn startup(owner: HWND) {
 pub(super) fn poll(owner: HWND) {
     let mut checker = CHECKER.lock().unwrap();
     let changed = checker.poll();
-    if !checker.busy() {
+    if UPDATE_RECOVERY_CANCELLED.load(Ordering::Acquire) && checker.recover() {
+        UPDATE_RECOVERED.store(false, Ordering::Release);
+        request_control(UPDATE_RECOVER);
+    }
+    if checker.state == State::Recovering && UPDATE_RECOVERED.load(Ordering::Acquire) {
+        checker.recovered();
+    }
+    if checker.state == State::ReadyToExit {
+        request_control(EXIT);
+    }
+    if changed && matches!(checker.state, State::InstallFailed(_)) {
+        request_control(CANCEL_UPDATE_RECOVERY);
+    }
+    if !checker.busy() && !matches!(checker.state, State::Staged(_)) {
         unsafe { KillTimer(owner, TIMER) };
     }
     drop(checker);
-    if changed {
+    if changed
+        || matches!(
+            CHECKER.lock().unwrap().state,
+            State::Recovering | State::Installing
+        )
+    {
         refresh();
     }
 }
@@ -38,11 +56,6 @@ pub(super) fn refresh() {
     }
     let checker = CHECKER.lock().unwrap();
     let state = checker.state.clone();
-    let path = checker
-        .staged
-        .as_ref()
-        .map(|package| package.path.display().to_string())
-        .unwrap_or_default();
     drop(checker);
     let label = match &state {
         State::Idle | State::Checking => text("Checking for updates...").to_owned(),
@@ -53,16 +66,36 @@ pub(super) fn refresh() {
         State::Failed(error) => {
             text("Could not check for updates.\n\n{error}").replace("{error}", text(error))
         }
-        State::DownloadFailed(error) => text("Could not download the update.\n\n{error}").replace("{error}", text(error)),
+        State::DownloadFailed(error) => {
+            text("Could not download the update.\n\n{error}").replace("{error}", text(error))
+        }
         State::Downloading { downloaded, total } => match total.filter(|total| *total > 0) {
             Some(total) => text("Downloading update: {percent}% ({bytes} bytes)")
-                .replace("{percent}", &(u128::from(*downloaded) * 100 / u128::from(total)).min(100).to_string())
+                .replace(
+                    "{percent}",
+                    &(u128::from(*downloaded) * 100 / u128::from(total))
+                        .min(100)
+                        .to_string(),
+                )
                 .replace("{bytes}", &downloaded.to_string()),
-            None => text("Downloading update... ({bytes} bytes)").replace("{bytes}", &downloaded.to_string()),
+            None => text("Downloading update... ({bytes} bytes)")
+                .replace("{bytes}", &downloaded.to_string()),
         },
         State::Verifying => text("Verifying update package...").to_owned(),
-        State::Staged(version) => text("Update {version} verified and staged.\nYour installation has not changed.\nClosing this window discards the package.\n\n{path}")
-            .replace("{version}", version).replace("{path}", &path),
+        State::Staged(_) => text("Verifying update package...").to_owned(),
+        State::Recovering => {
+            let mut label = text("Recovering windows before updating...\nRetry recovery or cancel to keep WinRoll running.").to_owned();
+            for (name, pid, hwnd) in RECOVERY_WINDOWS.lock().unwrap().iter() {
+                label.push_str(&format!("\n{name} (PID {pid}, HWND {hwnd:#x})"));
+            }
+            label
+        }
+        State::Installing | State::ReadyToExit => {
+            text("Installing update and restarting WinRoll...").to_owned()
+        }
+        State::InstallFailed(error) => {
+            text("Could not install the update.\n\n{error}").replace("{error}", text(error))
+        }
     };
     let wide: Vec<u16> = label
         .replace("\r\n", "\n")
@@ -87,7 +120,11 @@ pub(super) fn refresh() {
             GetDlgItem(hwnd, IDOK),
             if matches!(
                 state,
-                State::Available(_) | State::Failed(_) | State::DownloadFailed(_)
+                State::Available(_)
+                    | State::Failed(_)
+                    | State::DownloadFailed(_)
+                    | State::InstallFailed(_)
+                    | State::Recovering
             ) {
                 SW_SHOW
             } else {
@@ -99,7 +136,10 @@ pub(super) fn refresh() {
             wide_text(
                 if matches!(
                     state,
-                    State::Checking | State::Downloading { .. } | State::Verifying
+                    State::Checking
+                        | State::Downloading { .. }
+                        | State::Verifying
+                        | State::Recovering
                 ) {
                     "Cancel"
                 } else {
@@ -107,6 +147,10 @@ pub(super) fn refresh() {
                 },
             )
             .as_ptr(),
+        );
+        windows_sys::Win32::UI::Input::KeyboardAndMouse::EnableWindow(
+            GetDlgItem(hwnd, IDCANCEL),
+            (!matches!(state, State::Installing | State::ReadyToExit)) as i32,
         );
     }
 }
@@ -191,7 +235,12 @@ unsafe extern "system" fn window_proc(hwnd: HWND, message: u32, w: WPARAM, l: LP
                     startup(owner);
                     refresh();
                     SetFocus(GetDlgItem(hwnd, IDCANCEL));
-                } else if matches!(state, State::Available(_) | State::DownloadFailed(_)) {
+                } else if state == State::Recovering {
+                    request_control(UPDATE_RECOVER);
+                } else if matches!(
+                    state,
+                    State::Available(_) | State::DownloadFailed(_) | State::InstallFailed(_)
+                ) {
                     let mut checker = CHECKER.lock().unwrap();
                     if SetTimer(owner, TIMER, 100, None) == 0 {
                         checker.state =
@@ -206,15 +255,19 @@ unsafe extern "system" fn window_proc(hwnd: HWND, message: u32, w: WPARAM, l: LP
                 return 0;
             }
             WM_COMMAND if w & 0xffff == IDCANCEL as usize => {
-                DestroyWindow(hwnd);
+                if can_close() {
+                    DestroyWindow(hwnd);
+                }
                 return 0;
             }
             WM_CLOSE => {
-                DestroyWindow(hwnd);
+                if can_close() {
+                    DestroyWindow(hwnd);
+                }
                 return 0;
             }
             WM_DESTROY => {
-                CHECKER.lock().unwrap().cancel();
+                cancel_recovery();
                 KillTimer(GetWindow(hwnd, GW_OWNER), TIMER);
                 WINDOW.store(0, Ordering::Relaxed);
                 return 0;
@@ -304,6 +357,10 @@ pub(super) fn show(owner: HWND) {
                 | State::Verifying
                 | State::Staged(_)
                 | State::DownloadFailed(_)
+                | State::Recovering
+                | State::Installing
+                | State::ReadyToExit
+                | State::InstallFailed(_)
         ) {
             startup(owner);
         }
@@ -337,7 +394,9 @@ pub(super) fn dialog_message(msg: &MSG) -> bool {
                     return true;
                 }
                 27 => {
-                    DestroyWindow(hwnd);
+                    if can_close() {
+                        DestroyWindow(hwnd);
+                    }
                     return true;
                 }
                 _ => {}
@@ -356,6 +415,29 @@ pub(super) fn close(owner: HWND) {
             DestroyWindow(hwnd);
         }
     }
+}
+
+fn can_close() -> bool {
+    !matches!(
+        CHECKER.lock().unwrap().state,
+        State::Installing | State::ReadyToExit
+    )
+}
+
+pub(super) fn cancel_recovery() -> bool {
+    let mut checker = CHECKER.lock().unwrap();
+    if checker.state == State::Installing {
+        return false;
+    }
+    if checker.state == State::ReadyToExit {
+        return true;
+    }
+    if checker.state == State::Recovering {
+        CONTROL_REQUESTS.fetch_and(!UPDATE_RECOVER, Ordering::Relaxed);
+        request_control(CANCEL_UPDATE_RECOVERY);
+    }
+    checker.cancel();
+    true
 }
 
 #[cfg_attr(test, test)]
@@ -383,7 +465,6 @@ pub(super) fn self_test() -> Result<(), String> {
             {
                 return Err("Update dialog did not translate the available version".into());
             }
-            let staged = "Update {version} verified and staged.\nYour installation has not changed.\nClosing this window discards the package.\n\n{path}";
             for (state, expected, action, cancel) in [
                 (
                     State::Available("1.1.0".into()),
@@ -419,10 +500,26 @@ pub(super) fn self_test() -> Result<(), String> {
                 ),
                 (
                     State::Staged("1.1.0".into()),
-                    text(staged)
-                        .replace("{version}", "1.1.0")
-                        .replace("{path}", ""),
+                    text("Verifying update package...").to_owned(),
                     None,
+                    "Close",
+                ),
+                (
+                    State::Recovering,
+                    text("Recovering windows before updating...\nRetry recovery or cancel to keep WinRoll running.").to_owned(),
+                    Some("&Retry"),
+                    "Cancel",
+                ),
+                (
+                    State::Installing,
+                    text("Installing update and restarting WinRoll...").to_owned(),
+                    None,
+                    "Close",
+                ),
+                (
+                    State::InstallFailed("offline".into()),
+                    text("Could not install the update.\n\n{error}").replace("{error}", "offline"),
+                    Some("&Retry"),
                     "Close",
                 ),
                 (
@@ -433,6 +530,7 @@ pub(super) fn self_test() -> Result<(), String> {
                     "Close",
                 ),
             ] {
+                let installing = state == State::Installing;
                 CHECKER.lock().unwrap().state = state;
                 refresh();
                 let control_text = |id| {
@@ -454,6 +552,18 @@ pub(super) fn self_test() -> Result<(), String> {
                     || action.is_some_and(|action| control_text(IDOK) != text(action))
                 {
                     return Err("Update consent or retry action is incorrect".into());
+                }
+                if installing {
+                    unsafe { SendMessageW(hwnd, WM_CLOSE, 0, 0); }
+                    let escape = MSG {
+                        hwnd: unsafe { GetDlgItem(hwnd, 10) },
+                        message: WM_KEYDOWN,
+                        wParam: 27,
+                        ..Default::default()
+                    };
+                    if !dialog_message(&escape) || unsafe { IsWindow(hwnd) } == 0 || can_close() {
+                        return Err("Installation could be interrupted by closing its UI".into());
+                    }
                 }
             }
         }

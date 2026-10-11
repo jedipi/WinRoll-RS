@@ -44,6 +44,8 @@ fn wide_text(english: &str) -> Vec<u16> {
 static COMMANDS: OnceLock<SyncSender<Command>> = OnceLock::new();
 static CONTROL_REQUESTS: AtomicU32 = AtomicU32::new(0);
 static RECOVERY_PENDING: AtomicBool = AtomicBool::new(false);
+static UPDATE_RECOVERED: AtomicBool = AtomicBool::new(false);
+static UPDATE_RECOVERY_CANCELLED: AtomicBool = AtomicBool::new(true);
 static RECOVERY_WINDOWS: Mutex<Vec<(String, u32, isize)>> = Mutex::new(Vec::new());
 static WORKER_FINISHED: AtomicBool = AtomicBool::new(false);
 static TASKBAR_CREATED: OnceLock<u32> = OnceLock::new();
@@ -64,6 +66,8 @@ const SETTINGS: u32 = 32;
 const CHECK_UPDATE: u32 = 64;
 const RECREATE_TRAY: u32 = 256;
 const TOGGLE_ENABLED: u32 = 512;
+const UPDATE_RECOVER: u32 = 1024;
+const CANCEL_UPDATE_RECOVERY: u32 = 2048;
 // TBM_GETPOS is WM_USER, omitted by the windows-sys metadata.
 const TBM_GETPOS: u32 = WM_USER;
 const TRAY_CALLBACK: u32 = WM_APP + 1;
@@ -133,6 +137,8 @@ struct Manager {
     transparency_property: Vec<u16>,
     roll_recovery: bool,
     exit_pending: bool,
+    update_recovery: bool,
+    full_recovery: bool,
     property: Vec<u16>,
     next_marker: usize,
     integrity: u32,
@@ -275,6 +281,8 @@ impl Manager {
                 .encode_utf16()
                 .collect(),
             exit_pending: false,
+            update_recovery: false,
+            full_recovery: false,
             property: format!("WinRoll-RS.Experiment.{pid}\0")
                 .encode_utf16()
                 .collect(),
@@ -1064,24 +1072,24 @@ impl Manager {
         for target in self
             .windows
             .values()
-            .filter(|_| self.exit_pending || self.roll_recovery)
+            .filter(|_| self.exit_pending || self.full_recovery || self.roll_recovery)
             .map(|saved| saved.target)
             .chain(
                 self.topmost
                     .values()
-                    .filter(|_| self.exit_pending)
+                    .filter(|_| self.exit_pending || self.full_recovery)
                     .map(|(target, _, _)| *target),
             )
             .chain(
                 self.transparent
                     .values()
-                    .filter(|_| self.exit_pending)
+                    .filter(|_| self.exit_pending || self.full_recovery)
                     .map(|saved| saved.target),
             )
             .chain(
                 self.hidden
                     .values()
-                    .filter(|_| self.exit_pending)
+                    .filter(|_| self.exit_pending || self.full_recovery)
                     .map(|saved| saved.target),
             )
         {
@@ -1099,6 +1107,13 @@ impl Manager {
 
     // Returns true only when Exit has verified every surviving managed window.
     fn control(&mut self, action: u32) -> bool {
+        if action == CANCEL_UPDATE_RECOVERY {
+            self.update_recovery = false;
+            UPDATE_RECOVERED.store(false, Ordering::Release);
+            self.publish_recovery();
+            UPDATE_RECOVERY_CANCELLED.store(true, Ordering::Release);
+            return false;
+        }
         if action == TOGGLE_ENABLED {
             return self.control(if STOPPING.load(Ordering::Relaxed) {
                 ENABLE
@@ -1108,6 +1123,8 @@ impl Manager {
         }
         if action == ENABLE {
             if !self.exit_pending
+                && !self.update_recovery
+                && !self.full_recovery
                 && (self.windows.is_empty() || !RECOVERY_PENDING.load(Ordering::Relaxed))
             {
                 STOPPING.store(false, Ordering::Relaxed);
@@ -1122,20 +1139,41 @@ impl Manager {
             STOPPING.store(true, Ordering::Relaxed);
             self.exit_pending = true;
         }
-        if self.exit_pending {
+        if action == UPDATE_RECOVER {
+            STOPPING.store(true, Ordering::Relaxed);
+            self.update_recovery = true;
+            self.full_recovery = true;
+        }
+        if self.exit_pending || self.full_recovery {
             self.restore_all_hidden();
         }
         let mut restored = self.restore_all();
         self.roll_recovery = !restored;
-        if self.exit_pending {
+        if self.exit_pending || self.full_recovery {
             self.restore_topmost();
             self.restore_all_transparency();
             restored &=
                 self.topmost.is_empty() && self.transparent.is_empty() && self.hidden.is_empty();
         }
         self.publish_recovery();
+        self.publish_update_recovered();
         log(format!("CONTROL action={action} restored={restored}"));
         self.exit_pending && restored
+    }
+
+    fn recovered(&self) -> bool {
+        self.windows.is_empty()
+            && self.topmost.is_empty()
+            && self.transparent.is_empty()
+            && self.hidden.is_empty()
+    }
+
+    fn publish_update_recovered(&mut self) {
+        let recovered = self.recovered();
+        if recovered {
+            self.full_recovery = false;
+        }
+        UPDATE_RECOVERED.store(self.update_recovery && recovered, Ordering::Release);
     }
 }
 
@@ -1259,9 +1297,27 @@ unsafe extern "system" fn mouse_hook(code: i32, message: WPARAM, data: LPARAM) -
     }
 }
 
+fn control_action(requests: u32) -> u32 {
+    [
+        EXIT,
+        CANCEL_UPDATE_RECOVERY,
+        UPDATE_RECOVER,
+        PAUSE,
+        UNROLL_ALL,
+        ENABLE,
+        TOGGLE_ENABLED,
+    ]
+    .into_iter()
+    .find(|action| requests & action != 0)
+    .unwrap()
+}
+
 fn request_control(action: u32) {
-    if action == PAUSE || action == EXIT {
+    if matches!(action, PAUSE | EXIT | UPDATE_RECOVER) {
         STOPPING.store(true, Ordering::Relaxed);
+    }
+    if action == CANCEL_UPDATE_RECOVERY {
+        UPDATE_RECOVERY_CANCELLED.store(false, Ordering::Release);
     }
     // Lifecycle requests cannot be lost behind a full mouse-probe queue.
     CONTROL_REQUESTS.fetch_or(action, Ordering::Relaxed);
@@ -2220,7 +2276,9 @@ unsafe extern "system" fn tray_proc(hwnd: HWND, message: u32, w: WPARAM, l: LPAR
                 if action == CHECK_UPDATE {
                     update_window::show(hwnd);
                 }
-                if matches!(action, ENABLE | PAUSE | UNROLL_ALL | EXIT) {
+                if matches!(action, ENABLE | PAUSE | UNROLL_ALL | EXIT)
+                    && (action != EXIT || update_window::cancel_recovery())
+                {
                     request_control(action);
                 }
                 return 0;
@@ -2230,7 +2288,9 @@ unsafe extern "system" fn tray_proc(hwnd: HWND, message: u32, w: WPARAM, l: LPAR
                 return 0;
             }
             WM_CLOSE => {
-                request_control(EXIT);
+                if update_window::cancel_recovery() {
+                    request_control(EXIT);
+                }
                 return 0;
             }
             _ => {}
@@ -2367,10 +2427,7 @@ pub fn run() -> Result<(), String> {
             }
             if requests & !RECREATE_TRAY != 0 {
                 // A stop request wins over Enable if multiple actions arrive while restoring.
-                let action = [EXIT, PAUSE, UNROLL_ALL, ENABLE, TOGGLE_ENABLED]
-                    .into_iter()
-                    .find(|action| requests & action != 0)
-                    .unwrap();
+                let action = control_action(requests);
                 if manager.control(action) {
                     break;
                 }
@@ -2429,12 +2486,8 @@ pub fn run() -> Result<(), String> {
                 manager.move_rolled(position);
             }
             manager.maintain_rolled_size();
-            if manager.exit_pending
-                && manager.windows.is_empty()
-                && manager.topmost.is_empty()
-                && manager.transparent.is_empty()
-                && manager.hidden.is_empty()
-            {
+            manager.publish_update_recovered();
+            if manager.exit_pending && manager.recovered() {
                 break;
             }
             let wait = if DRAG_ACTIVE.load(Ordering::Relaxed) {
@@ -2721,6 +2774,7 @@ fn self_test(interactive: bool) -> Result<(), String> {
             return Err("Close and caption gestures did not reject other hit regions".into());
         }
         self_test_topmost_exit(close_point)?;
+        self_test_update_recovery(point, second_hwnd)?;
         self_test_transparency(point, second_hwnd)?;
         self_test_topmost(&mut manager, close_point, false)?;
         self_test_topmost(&mut manager, close_point, true)?;
@@ -3134,6 +3188,160 @@ fn self_test(interactive: bool) -> Result<(), String> {
     self_test_options()?;
     update_window::self_test()?;
     self_test_menu_exit()
+}
+
+fn self_test_update_recovery(point: POINT, other_hwnd: HWND) -> Result<(), String> {
+    let mut manager = Manager::new()?;
+    let target = manager
+        .probe(point)
+        .ok_or("Update fixture caption unavailable")?;
+    let hwnd = target.hwnd as HWND;
+    let mut pid = 0;
+    let other = Target {
+        hwnd: other_hwnd as isize,
+        tid: unsafe { GetWindowThreadProcessId(other_hwnd, &mut pid) },
+        pid,
+        rect: rect(other_hwnd).ok_or("Update peer unavailable")?,
+    };
+    let original_percent = TRANSPARENCY.load(Ordering::Relaxed);
+    let original_topmost = unsafe { GetWindowLongW(hwnd, GWL_EXSTYLE) } as u32 & WS_EX_TOPMOST;
+    let result = (|| -> Result<(), String> {
+        if control_action(UPDATE_RECOVER | CANCEL_UPDATE_RECOVERY) != CANCEL_UPDATE_RECOVERY
+            || control_action(EXIT | CANCEL_UPDATE_RECOVERY) != EXIT
+        {
+            return Err("Update cancellation/Exit request ordering failed".into());
+        }
+        manager.toggle(target);
+        manager.toggle(other);
+        FIXTURE_REFUSES_EXPANSION.store(target.hwnd, Ordering::Relaxed);
+        if manager.control(UPDATE_RECOVER)
+            || manager.windows.len() != 1
+            || !manager.windows.contains_key(&target.hwnd)
+            || UPDATE_RECOVERED.load(Ordering::Acquire)
+            || !STOPPING.load(Ordering::Relaxed)
+            || rect(other_hwnd).map(bounds) != Some(bounds(other.rect))
+        {
+            return Err("Update recovery lost a refused roll or failed to recover its peer".into());
+        }
+        manager.control(ENABLE);
+        if !STOPPING.load(Ordering::Relaxed) {
+            return Err("Enable resumed gestures during update recovery".into());
+        }
+        request_control(CANCEL_UPDATE_RECOVERY);
+        if UPDATE_RECOVERY_CANCELLED.load(Ordering::Acquire) {
+            return Err("Update cancellation was acknowledged before worker processing".into());
+        }
+        let requests = CONTROL_REQUESTS.swap(0, Ordering::Relaxed);
+        manager.control(control_action(requests));
+        if manager.update_recovery
+            || manager.exit_pending
+            || !RECOVERY_PENDING.load(Ordering::Relaxed)
+            || !UPDATE_RECOVERY_CANCELLED.load(Ordering::Acquire)
+        {
+            return Err("Update cancel discarded pending recovery or requested Exit".into());
+        }
+        FIXTURE_REFUSES_EXPANSION.store(0, Ordering::Relaxed);
+        if manager.control(UNROLL_ALL)
+            || !manager.recovered()
+            || UPDATE_RECOVERED.load(Ordering::Acquire)
+            || !STOPPING.load(Ordering::Relaxed)
+        {
+            return Err("Cancelled update recovery retry exited or resumed gestures".into());
+        }
+        manager.tray_owner = target.hwnd;
+        manager.minimize_to_tray(other, true);
+        if manager.hidden.is_empty() || unsafe { IsWindowVisible(other_hwnd) } != 0 {
+            return Err("Update fixture was not hidden".into());
+        }
+        manager.toggle_topmost(target);
+        TRANSPARENCY.store(50, Ordering::Relaxed);
+        manager.toggle_transparency(target);
+        FIXTURE_REFUSES_SHOW.store(other.hwnd, Ordering::Relaxed);
+        FIXTURE_DELAYS_STYLE.store(target.hwnd, Ordering::Relaxed);
+        manager.control(UPDATE_RECOVER);
+        if manager.hidden.is_empty()
+            || manager.transparent.is_empty()
+            || UPDATE_RECOVERED.load(Ordering::Acquire)
+            || !manager.topmost.is_empty()
+            || unsafe { GetWindowLongW(hwnd, GWL_EXSTYLE) } as u32 & WS_EX_TOPMOST
+                != original_topmost
+        {
+            return Err(
+                "Update recovery discarded hidden/transparency state or failed topmost restoration"
+                    .into(),
+            );
+        }
+        manager.control(CANCEL_UPDATE_RECOVERY);
+        let affected = RECOVERY_WINDOWS.lock().unwrap().clone();
+        if !affected.iter().any(|(_, _, key)| *key == target.hwnd)
+            || !affected.iter().any(|(_, _, key)| *key == other.hwnd)
+        {
+            return Err("Cancelled update omitted hidden/transparency recovery identities".into());
+        }
+        manager.control(ENABLE);
+        if !STOPPING.load(Ordering::Relaxed) {
+            return Err("Enable resumed with cancelled update recovery still pending".into());
+        }
+        FIXTURE_REFUSES_SHOW.store(0, Ordering::Relaxed);
+        FIXTURE_DELAYS_STYLE.store(0, Ordering::Relaxed);
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while !manager.recovered() && Instant::now() < deadline {
+            if manager.control(UNROLL_ALL) {
+                return Err("Cancelled update retry unexpectedly exited".into());
+            }
+            thread::sleep(Duration::from_millis(20));
+        }
+        if !manager.recovered()
+            || unsafe { IsWindowVisible(other_hwnd) } == 0
+            || unsafe { GetWindowLongW(hwnd, GWL_EXSTYLE) } as u32 & WS_EX_LAYERED != 0
+        {
+            return Err("Cancelled update retry failed hidden/transparency restoration".into());
+        }
+        manager.control(UPDATE_RECOVER);
+        if !UPDATE_RECOVERED.load(Ordering::Acquire) || manager.exit_pending {
+            return Err("Update recovery completion failed or requested Exit".into());
+        }
+        manager.control(ENABLE);
+        if !STOPPING.load(Ordering::Relaxed) {
+            return Err("Enable resumed while recovered update awaited installation".into());
+        }
+        manager.control(CANCEL_UPDATE_RECOVERY);
+        Ok(())
+    })();
+    FIXTURE_REFUSES_EXPANSION.store(0, Ordering::Relaxed);
+    FIXTURE_REFUSES_SHOW.store(0, Ordering::Relaxed);
+    FIXTURE_DELAYS_STYLE.store(0, Ordering::Relaxed);
+    manager.control(CANCEL_UPDATE_RECOVERY);
+    manager.control(UNROLL_ALL);
+    TRANSPARENCY.store(original_percent, Ordering::Relaxed);
+    STOPPING.store(false, Ordering::Relaxed);
+    result?;
+
+    let (closed_key, fixture) = spawn_fixture(false, true)?;
+    let mut pid = 0;
+    let closed = Target {
+        hwnd: closed_key,
+        tid: unsafe { GetWindowThreadProcessId(closed_key as HWND, &mut pid) },
+        pid,
+        rect: rect(closed_key as HWND).ok_or("Update closure fixture unavailable")?,
+    };
+    manager.toggle(closed);
+    FIXTURE_REFUSES_EXPANSION.store(closed_key, Ordering::Relaxed);
+    manager.control(UPDATE_RECOVER);
+    unsafe { PostMessageW(closed_key as HWND, WM_CLOSE, 0, 0) };
+    fixture
+        .join()
+        .map_err(|_| "Update closure fixture panicked")?;
+    FIXTURE_REFUSES_EXPANSION.store(0, Ordering::Relaxed);
+    if manager.control(UNROLL_ALL) || !UPDATE_RECOVERED.load(Ordering::Acquire) {
+        return Err("Closed update recovery target did not release pending restoration".into());
+    }
+    manager.control(CANCEL_UPDATE_RECOVERY);
+    manager.control(ENABLE);
+    log(
+        "PASS update recovery mixed outcomes, cancellation and paused retry, hidden/topmost/transparency restoration, closure and request ordering",
+    );
+    Ok(())
 }
 
 fn self_test_transparency(point: POINT, other_hwnd: HWND) -> Result<(), String> {
